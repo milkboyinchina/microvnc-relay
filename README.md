@@ -52,3 +52,10 @@ Sample configuration:
 | **Armbian TV Boxes** | ARMv7 / ARM64 | 512MB – 1GB | **< 35MB** |
 | **Raspberry Pi 3/4/5** | ARM64 (`aarch64`) | 1GB – 8GB | **< 35MB** |
 | **Linux Servers & Workstations** | x86-64 (`amd64`) | 1GB+ | **< 40MB** |
+
+---
+
+## License
+
+This project is licensed under the **Apache License, Version 2.0**. See the [LICENSE](LICENSE) file for details.
+
