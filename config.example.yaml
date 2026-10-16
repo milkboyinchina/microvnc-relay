@@ -2,12 +2,41 @@
 # μVNC Relay (MicroVNC Relay) Configuration
 # ==============================================================================
 
+# ==============================================================================
+# Feature Toggles (Tune modules to run ultra-lean on constrained SBCs)
+# ==============================================================================
+features:
+  # Web management dashboard & REST API
+  # Set to false to run in "Headless Pure Relay" mode (~6MB - 10MB RAM)
+  webui_enabled: true
+
+  # In-browser noVNC HTML5 viewer and WebSocket-to-TCP bridge (/ws/vnc/*)
+  # Disable if you only use native desktop VNC clients to save WebSocket buffers
+  novnc_enabled: true
+
+  # Mode 1: Direct port-forwarding & virtual port mapping
+  mode1_enabled: true
+
+  # Mode 2: UltraVNC reverse ID matchmaker (ports 5500 & 5901)
+  # Disable if all your machines use direct port mappings
+  mode2_enabled: true
+
+  # Background latency probes (periodic TCP SYN handshakes to target machines)
+  # Disable to eliminate background polling timers entirely
+  latency_probes_enabled: true
+
+  # Live bandwidth metering (atomic RX/TX throughput counters)
+  bandwidth_metering_enabled: true
+
+# ==============================================================================
+# Network & Listener Bindings
+# ==============================================================================
 server:
-  # WebUI & API binding
-  # Use "0.0.0.0:8080" to listen on all interfaces, or bind to NetBird IP (e.g. "100.64.0.1:8080")
+  # WebUI & API listener (Ignored if features.webui_enabled is false)
+  # Bind to "0.0.0.0:8080" for all interfaces, or NetBird IP (e.g. "100.64.0.1:8080")
   web_bind: "0.0.0.0:8080"
 
-  # Base listener for Mode 1 direct port-mapped connections
+  # Base listener IP for Mode 1 direct port-mapped connections
   vnc_bind: "0.0.0.0"
 
   # Port for Mode 2 UltraVNC reverse connections (target servers dial in here)
@@ -16,8 +45,11 @@ server:
   # Mode 2 viewer port where clients specify ID:<codeplate>
   mode2_viewer_port: 5901
 
+# ==============================================================================
+# Authentication & Security
+# ==============================================================================
 security:
-  # Protect WebUI with password authentication
+  # Protect WebUI with session password authentication
   auth_enabled: false
   username: "admin"
   # Bcrypt hash or plain text on first launch (auto-hashed on startup)
@@ -26,9 +58,12 @@ security:
   # Session timeout in minutes
   session_timeout_minutes: 1440
 
+# ==============================================================================
+# Logging & Storage (Flash Wear Protection)
+# ==============================================================================
 logging:
-  # Ephemeral memory buffer preserves SD card / eMMC flash lifespan
   # Set to true ONLY if you require persistent disk logs
+  # Default is false: logs stay in a RAM ring buffer to preserve MicroSD / eMMC flash
   disk_logging: false
   log_level: "info" # debug, info, warn, error
   log_file: "/var/log/microvnc-relay/app.log"
@@ -36,13 +71,18 @@ logging:
   max_backups: 2
   in_memory_buffer_lines: 500
 
+# ==============================================================================
+# Telemetry Timers
+# ==============================================================================
 telemetry:
-  # Telemetry update interval to WebUI over WebSocket (seconds)
+  # Real-time metrics broadcast interval over WebSocket to WebUI (seconds)
   broadcast_interval_sec: 1
-  # Latency probe interval to target VNC servers (seconds)
+  # Latency probe frequency to target VNC servers (seconds)
   target_ping_interval_sec: 15
 
-# Registered target VNC devices
+# ==============================================================================
+# Registered Target VNC Devices
+# ==============================================================================
 devices:
   - id: "pi2-lab"
     name: "Raspberry Pi 2 (Workbench)"

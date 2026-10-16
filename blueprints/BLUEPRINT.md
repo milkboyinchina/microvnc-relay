@@ -68,7 +68,31 @@
 
 ---
 
-## 5. State Management & Memory Durability
+## 5. Modular Subsystem Toggles & Ultra-Lean Profiles
+
+To accommodate the most resource-constrained edge hardware (e.g. Orange Pi Zero LTS with 256MB RAM or headless servers), all major subsystems can be toggled via `config.yaml`:
+
+```yaml
+features:
+  webui_enabled: true             # Set false for Headless Pure Relay (~6-10MB RAM)
+  novnc_enabled: true             # Set false to disable WebSocket-to-TCP bridge
+  mode1_enabled: true             # Mode 1 direct port mapping
+  mode2_enabled: true             # Mode 2 reverse ID listener (ports 5500 & 5901)
+  latency_probes_enabled: true    # Background TCP SYN polling
+  bandwidth_metering_enabled: true# Atomic RX/TX throughput counters
+```
+
+### Memory Footprint Profiles
+
+| Operational Profile | Active Features | Idle RAM (RSS) | Active Load (4 Streams) | Use Case |
+|---|---|---|---|---|
+| **Full Stack** | WebUI + noVNC + Telemetry + Mode 1 & 2 | ~15 MB | ~25 MB – 32 MB | Default deployment, rich management |
+| **Dashboard Only** | WebUI + Telemetry (noVNC disabled) | ~12 MB | ~18 MB – 22 MB | Native VNC viewers only (TigerVNC/RealVNC) |
+| **Headless Pure Relay** | Mode 1 / 2 only (WebUI & noVNC OFF) | **~6 MB** | **~10 MB – 14 MB** | **Ultra-constrained 256MB SBCs & IoT gateways** |
+
+---
+
+## 6. State Management & Memory Durability
 
 To ensure the daemon runs 24/7 indefinitely without memory growth or SD card failure:
 
@@ -82,7 +106,7 @@ To ensure the daemon runs 24/7 indefinitely without memory growth or SD card fai
 
 ---
 
-## 6. Telemetry & Two-Hop Latency Engine
+## 7. Telemetry & Two-Hop Latency Engine
 
 ```
 [Client / Viewer] ──(Hop 1: TCP_INFO RTT)──► [μVNC Relay] ──(Hop 2: TCP SYN Probe)──► [Target VNC]
@@ -99,7 +123,7 @@ To ensure the daemon runs 24/7 indefinitely without memory growth or SD card fai
 
 ---
 
-## 7. Service Lifecycle & Autostart
+## 8. Service Lifecycle & Autostart
 
 - **Native Linux (Systemd)**:
   - Unit `/etc/systemd/system/microvnc-relay.service` with `After=network-online.target netbird.service`.

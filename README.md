@@ -9,12 +9,13 @@ Engineered specifically for **ARMv7** (Raspberry Pi 2, Orange Pi Zero LTS, 32-bi
 ## Key Capabilities
 
 - **Zero Data Caching & Flash Wear Protection**: All RFB framebuffer updates stream strictly through transient memory buffers; zero writes hit the MicroSD or eMMC flash storage.
-- **Strict Memory Envelope**: Bounded memory footprint (< 35MB process RSS), comfortably fitting inside 256MB/512MB RAM boards.
+- **Strict Memory Envelope**: Bounded memory footprint (< 35MB process RSS in full WebUI mode, dropping to **~6MB – 10MB in Headless Pure Relay mode**), comfortably fitting inside 256MB/512MB RAM boards.
+- **Modular Feature Toggles**: Disable unused subsystems in `config.yaml` (`webui_enabled`, `novnc_enabled`, `mode1_enabled`, `mode2_enabled`, `latency_probes_enabled`, `bandwidth_metering_enabled`) to eliminate background routines and minimize RAM.
 - **Universal VNC Compatibility**: Supports TightVNC, TigerVNC, RealVNC, x11vnc, and UltraVNC (Mode 1 direct port mapping and Mode 2 reverse ID matchmaking).
 - **Two-Hop Latency Engine**:
   - *Client ↔ Relay*: Microsecond RTT extracted directly from Linux kernel `TCP_INFO`.
   - *Relay ↔ Target*: Active periodic TCP handshake latency probes.
-- **Embedded WebUI**: Self-contained web interface with device routing, real-time bandwidth gauges, and an in-memory ephemeral log inspector.
+- **Embedded WebUI & noVNC**: Self-contained web interface with device routing, real-time bandwidth gauges, and optional 1-click in-browser HTML5 remote control.
 - **NetBird VPN Compatible**: Operates seamlessly over NetBird WireGuard mesh overlays (`wt0`), local LAN, or public networks.
 
 ---
