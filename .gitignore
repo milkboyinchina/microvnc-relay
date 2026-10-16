@@ -30,3 +30,9 @@ Thumbs.db
 .vscode/
 *.swp
 *~
+
+# AI Agent Customizations (Local Workspace)
+AGENTS.md
+GEMINI.md
+.agents/
+.agent/
