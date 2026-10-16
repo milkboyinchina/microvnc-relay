@@ -406,6 +406,11 @@ func (a *APIHandler) CollectMetrics() map[string]any {
 		traffic = a.meter.Snapshot(false)
 	}
 
+	var activeSessionsCount int
+	if a.meter != nil {
+		activeSessionsCount = len(a.meter.GetSessions())
+	}
+
 	return map[string]any{
 		"uptime_seconds":        int64(time.Since(a.startTime).Seconds()),
 		"memory_rss_bytes":      rssBytes,
@@ -416,7 +421,7 @@ func (a *APIHandler) CollectMetrics() map[string]any {
 		"total_tx_bytes_sec":    traffic.TotalTxBytesSec,
 		"total_cumulative_rx":   traffic.TotalCumulativeRx,
 		"total_cumulative_tx":   traffic.TotalCumulativeTx,
-		"active_sessions_count": len(a.meter.GetSessions()),
+		"active_sessions_count": activeSessionsCount,
 	}
 }
 

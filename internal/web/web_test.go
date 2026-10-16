@@ -428,3 +428,46 @@ func TestFirstRunAuthSetupAndReset(t *testing.T) {
 	}
 }
 
+func TestIndexHTMLModalNesting(t *testing.T) {
+	data, err := os.ReadFile("../../web/dist/index.html")
+	if err != nil {
+		t.Fatalf("failed to read index.html: %v", err)
+	}
+	html := string(data)
+
+	loginIdx := strings.Index(html, `id="login-modal"`)
+	setupIdx := strings.Index(html, `id="setup-modal"`)
+	if loginIdx == -1 || setupIdx == -1 {
+		t.Fatalf("expected both login-modal and setup-modal in index.html (login: %d, setup: %d)", loginIdx, setupIdx)
+	}
+	if loginIdx >= setupIdx {
+		t.Fatalf("expected login-modal to precede setup-modal")
+	}
+
+	// Between login-modal opening and setup-modal opening, all divs must be balanced
+	between := html[loginIdx:setupIdx]
+	openDivs := strings.Count(between, "<div")
+	closeDivs := strings.Count(between, "</div>")
+
+	if openDivs != closeDivs {
+		t.Fatalf("login-modal is not properly closed before setup-modal: open <div count=%d, close </div> count=%d (diff=%d)",
+			openDivs, closeDivs, openDivs-closeDivs,
+		)
+	}
+}
+
+func TestCollectMetricsNilMeter(t *testing.T) {
+	cfg := config.DefaultConfig()
+	api := NewAPIHandler(cfg, "", nil, nil, nil, nil, nil, nil, "test")
+
+	// Ensure CollectMetrics does not panic when meter is nil
+	metrics := api.CollectMetrics()
+	if metrics == nil {
+		t.Fatal("expected non-nil metrics map")
+	}
+	if count, ok := metrics["active_sessions_count"].(int); !ok || count != 0 {
+		t.Fatalf("expected active_sessions_count to be 0, got %v", metrics["active_sessions_count"])
+	}
+}
+
+
