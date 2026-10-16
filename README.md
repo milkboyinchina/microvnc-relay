@@ -76,7 +76,7 @@ OR THE USE, MISUSE, INABILITY TO USE, OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### Phase 2: Packaging & Ecosystem Expansion
 - Multi-arch Docker images (`linux/arm/v7`, `linux/arm64`, `linux/amd64`) with optional NetBird client sidecar.
-- Native package generation (`.deb`, `.rpm`) and Flatpak manifest (`org.microvnc.Relay`).
+- Native package generation (`.deb`, `.rpm`) via `nfpm`.
 - Interactive SVG/Canvas visual network topology graph.
 - Embedded noVNC HTML5 in-browser viewer.
 

@@ -28,7 +28,7 @@
 - **Phase 2: Production Packaging & Expansion**
   - Multi-arch Docker images (`linux/arm/v7`, `linux/arm64`, `linux/amd64`).
   - Docker Compose setup with optional NetBird client sidecar.
-  - Native `.deb` and `.rpm` packaging via `nfpm`, plus Flatpak manifest (`org.microvnc.Relay`).
+  - Native `.deb` and `.rpm` packaging via `nfpm`.
   - Full visual network topology graph (interactive SVG/Canvas node map).
   - Embedded noVNC HTML5 in-browser viewer.
 
