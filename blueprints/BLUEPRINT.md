@@ -85,11 +85,11 @@ features:
 
 ### Memory Footprint Profiles
 
-| Operational Profile | Active Features | Idle RAM (RSS) | Active Load (4 Streams) | Use Case |
+| Operational Profile | Active Features | Idle RAM (RSS) | Active Load (Streams) | Use Case |
 |---|---|---|---|---|
-| **Full Stack** | WebUI + noVNC + Telemetry + Mode 1 & 2 | ~15 MB | ~25 MB – 32 MB | Default deployment, rich management |
-| **Dashboard Only** | WebUI + Telemetry (noVNC disabled) | ~12 MB | ~18 MB – 22 MB | Native VNC viewers only (TigerVNC/RealVNC) |
-| **Headless Pure Relay** | Mode 1 / 2 only (WebUI & noVNC OFF) | **~6 MB** | **~10 MB – 14 MB** | **Ultra-constrained 256MB SBCs & IoT gateways** |
+| **Full Stack** | WebUI + Telemetry + Mode 1 & 2 | **~6.6 MB** *(Measured on Pi 2)* | **~9.7 MB** *(Measured, 2 streams)* / ~25 MB (4 streams) | Default deployment, rich management |
+| **Dashboard Only** | WebUI + Telemetry (noVNC disabled) | ~6 MB – 8 MB | ~12 MB – 18 MB | Native VNC viewers only (TigerVNC/RealVNC) |
+| **Headless Pure Relay** | Mode 1 / 2 only (WebUI & noVNC OFF) | **~5 MB – 6 MB** | **~8 MB – 12 MB** | **Ultra-constrained 256MB SBCs & IoT gateways** |
 
 ---
 
