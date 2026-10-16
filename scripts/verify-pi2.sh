@@ -2,7 +2,10 @@
 # verify-pi2.sh — Automates Phase 1 Raspberry Pi 2 resource envelope and zero-disk verification
 set -euo pipefail
 
-PID=$(pgrep -f "microvnc-relay" || true)
+PID=$(pgrep -x "microvnc-relay" | head -n 1 || true)
+if [[ -z "$PID" ]]; then
+    PID=$(pgrep -f "/microvnc-relay" | head -n 1 || true)
+fi
 
 if [[ -z "$PID" ]]; then
     echo "Error: microvnc-relay process is not running. Start it with:"
