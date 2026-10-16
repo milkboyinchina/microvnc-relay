@@ -1,0 +1,31 @@
+# Binaries and build artifacts
+bin/
+dist/
+build/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+vnc-repeater*
+
+# Go artifacts
+*.test
+*.out
+go.work
+
+# Frontend build artifacts
+web/dist/
+web/node_modules/
+
+# Logs and runtime config
+*.log
+/config.yaml
+
+# OS and Editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

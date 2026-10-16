@@ -1,0 +1,71 @@
+# ==============================================================================
+# μVNC Relay (MicroVNC Relay) Configuration
+# ==============================================================================
+
+server:
+  # WebUI & API binding
+  # Use "0.0.0.0:8080" to listen on all interfaces, or bind to NetBird IP (e.g. "100.64.0.1:8080")
+  web_bind: "0.0.0.0:8080"
+
+  # Base listener for Mode 1 direct port-mapped connections
+  vnc_bind: "0.0.0.0"
+
+  # Port for Mode 2 UltraVNC reverse connections (target servers dial in here)
+  mode2_reverse_port: 5500
+
+  # Mode 2 viewer port where clients specify ID:<codeplate>
+  mode2_viewer_port: 5901
+
+security:
+  # Protect WebUI with password authentication
+  auth_enabled: false
+  username: "admin"
+  # Bcrypt hash or plain text on first launch (auto-hashed on startup)
+  password_hash: "$2a$12$e8N4O1.UqMh0z7e5k8aE1.9JgU6P8f2K4r3B1t0y9u8i7o6p5q4w3"
+  
+  # Session timeout in minutes
+  session_timeout_minutes: 1440
+
+logging:
+  # Ephemeral memory buffer preserves SD card / eMMC flash lifespan
+  # Set to true ONLY if you require persistent disk logs
+  disk_logging: false
+  log_level: "info" # debug, info, warn, error
+  log_file: "/var/log/microvnc-relay/app.log"
+  max_size_mb: 5
+  max_backups: 2
+  in_memory_buffer_lines: 500
+
+telemetry:
+  # Telemetry update interval to WebUI over WebSocket (seconds)
+  broadcast_interval_sec: 1
+  # Latency probe interval to target VNC servers (seconds)
+  target_ping_interval_sec: 15
+
+# Registered target VNC devices
+devices:
+  - id: "pi2-lab"
+    name: "Raspberry Pi 2 (Workbench)"
+    host: "192.168.1.50"
+    port: 5900
+    virtual_port: 5910      # Clients connect via <relay-ip>:5910
+    mode2_id: 1234          # Optional UltraVNC Mode 2 ID
+    vnc_server_type: "x11vnc"
+    enabled: true
+
+  - id: "armbian-tvbox"
+    name: "Orange Pi / Armbian Box"
+    host: "192.168.1.51"
+    port: 5901
+    virtual_port: 5911      # Clients connect via <relay-ip>:5911
+    mode2_id: 1235
+    vnc_server_type: "tightvnc"
+    enabled: true
+
+  - id: "desktop-pc"
+    name: "Workstation Main Desktop"
+    host: "192.168.1.52"
+    port: 5900
+    virtual_port: 5912
+    vnc_server_type: "realvnc"
+    enabled: true
