@@ -26,6 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Hop 1 (Client $\leftrightarrow$ Relay) zero-packet Linux kernel `TCP_INFO` RTT inspector (`internal/telemetry/tcpinfo_linux.go`) via `unix.GetsockoptTCPInfo(fd, SOL_TCP, TCP_INFO)` with cross-platform fallback stub (`internal/telemetry/tcpinfo_other.go`).
   - Hop 2 (Relay $\leftrightarrow$ Target) non-intrusive TCP SYN handshake pinger (`internal/telemetry/pinger.go`) with configurable polling interval (`target_ping_interval_sec`), on-demand single-device probe support, Mode 2 waiting-server awareness, and bounded status map pruning.
   - Unit tests (`internal/telemetry/pinger_test.go`) verifying kernel `TCP_INFO` extraction, online/offline target detection, map pruning, and `latency_probes_enabled: false` feature gating.
+- Milestone 5 embedded WebUI & REST / WebSocket Hub (`internal/web` and `web/dist`):
+  - Self-contained, responsive vanilla SPA (`web/dist/index.html`, `style.css`, `app.js`) with zero CDN dependencies embedded into binary via `//go:embed`.
+  - Pure-Go RFC 6455 WebSocket hub (`internal/web/ws_hub.go`) streaming 1Hz telemetry payloads (instantaneous and cumulative throughput, active streams, Hop 1 & Hop 2 RTTs, and OS process RSS) to connected dashboards without serialization overhead when idle.
+  - REST API (`internal/web/api.go`): full device CRUD with atomic config save and live Mode 1 reloader invocation, immediate target test probes, active session listing and force-disconnect, system memory inspection, and event log ring buffer streaming.
+  - Authentication manager (`internal/web/auth.go`) supporting bcrypt password hashes, automatic plaintext-to-bcrypt upgrade, and HTTP-only session cookies.
+  - Integration test suite (`internal/web/web_test.go`) verifying static asset serving, auth protection, device CRUD, session termination, and WebSocket upgrades.
+- Milestone 6 systemd service & deployment assets (`packaging/systemd`, `scripts`):
+  - Systemd service unit (`packaging/systemd/microvnc-relay.service`) with `MemoryMax=128M` cgroup ceiling, `GOMEMLIMIT=48MiB`, `Restart=always`, and `After=network-online.target netbird.service`.
+  - Deployment installer (`scripts/install-systemd.sh`) and Raspberry Pi 2 resource envelope acceptance verification script (`scripts/verify-pi2.sh`).
+  - Multi-target static cross-compilation matrix verification across `linux/arm` (`GOARM=7`), `linux/arm64`, `linux/amd64`, and `windows/amd64`.
 
 
 ## [0.1.0-alpha] - 2026-10-16

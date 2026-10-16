@@ -1,0 +1,30 @@
+[Unit]
+Description=μVNC Relay - Ultra-Lightweight VNC Proxy, Gateway & WebUI
+Documentation=https://github.com/milkboyinchina/microvnc-relay
+After=network-online.target netbird.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/microvnc-relay -config /etc/microvnc-relay/config.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5s
+
+# Memory Safety & Flash Protection Boundaries (< 35MB Active RSS Budget)
+Environment="GOMEMLIMIT=48MiB" "GOGC=50"
+MemoryMax=128M
+LimitNOFILE=65536
+
+# Sandboxing & System Hardening
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Logging directly to systemd journal (avoids SD card flash wearout)
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/microvnc-relay-banner.jpg" alt="μVNC Relay - Old protocol. Zero copy. Pure speed." width="100%">
+</p>
+
 # μVNC Relay (MicroVNC Relay)
 
 An ultra-lightweight, zero-cache VNC (RFB) proxy, relay gateway, and visual management hub with real-time bandwidth metering and bidirectional latency inspection.

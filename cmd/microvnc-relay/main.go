@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"github.com/milkboyinchina/microvnc-relay/internal/logger"
 	"github.com/milkboyinchina/microvnc-relay/internal/proxy"
 	"github.com/milkboyinchina/microvnc-relay/internal/telemetry"
+	"github.com/milkboyinchina/microvnc-relay/internal/web"
 )
 
 // Version is the current application version (overridden by -ldflags at build time).
@@ -100,6 +102,33 @@ func main() {
 	)
 	pinger.Start()
 
+	// Start Embedded WebUI, REST API, and WebSocket Telemetry Hub
+	webServer, err := web.NewServer(
+		cfg,
+		resolvedConfig,
+		meter,
+		pinger,
+		appLogger,
+		mode1Mgr.Reload,
+		Version,
+	)
+	if err != nil {
+		slog.Error("Failed to initialize WebUI server", "error", err)
+		pinger.Stop()
+		mode2Mgr.Stop()
+		mode1Mgr.Stop()
+		close(stopMeter)
+		os.Exit(1)
+	}
+	if err := webServer.Start(); err != nil {
+		slog.Error("Failed to start WebUI server listener", "error", err)
+		pinger.Stop()
+		mode2Mgr.Stop()
+		mode1Mgr.Stop()
+		close(stopMeter)
+		os.Exit(1)
+	}
+
 	// Setup OS signal handling for clean teardown and SIGHUP config reload
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
@@ -123,6 +152,10 @@ func main() {
 		slog.Info("Received shutdown signal", "signal", sig.String())
 		break
 	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = webServer.Stop(shutdownCtx)
 
 	pinger.Stop()
 	mode2Mgr.Stop()
