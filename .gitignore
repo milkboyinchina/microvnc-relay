@@ -6,9 +6,9 @@ build/
 *.exe~
 *.dll
 *.so
-vnc-repeater*
-microvnc-relay*
-uvnc-relay*
+/vnc-repeater*
+/microvnc-relay*
+/uvnc-relay*
 
 # Go artifacts
 *.test
@@ -37,6 +37,3 @@ GEMINI.md
 .agents/
 .agent/
 
-# agents boilerplate
-agents-boilerplate/
-.protocol

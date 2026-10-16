@@ -1,0 +1,122 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/milkboyinchina/microvnc-relay/internal/config"
+)
+
+// Version is the current application version (overridden by -ldflags at build time).
+var Version = "0.1.0-alpha"
+
+func main() {
+	var (
+		configPath  string
+		showVersion bool
+	)
+
+	flag.StringVar(&configPath, "config", "", "Path to YAML configuration file")
+	flag.StringVar(&configPath, "c", "", "Path to YAML configuration file (shorthand)")
+	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
+	flag.BoolVar(&showVersion, "v", false, "Print version and exit (shorthand)")
+	flag.Parse()
+
+	if showVersion {
+		fmt.Printf("μVNC Relay (microvnc-relay) version %s (dev_build=%v)\n", Version, IsDevBuild)
+		os.Exit(0)
+	}
+
+	printBanner()
+
+	// Locate config file
+	resolvedConfig := resolveConfigPath(configPath)
+	slog.Info("Loading configuration", "path", resolvedConfig)
+
+	cfg, err := config.Load(resolvedConfig)
+	if err != nil {
+		slog.Error("Failed to load configuration", "error", err)
+		os.Exit(1)
+	}
+
+	logConfigurationSummary(cfg)
+
+	// Setup OS signal handling for clean teardown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+
+	slog.Info("μVNC Relay initialized successfully. Waiting for shutdown signal...")
+
+	sig := <-sigChan
+	slog.Info("Received shutdown signal", "signal", sig.String())
+	slog.Info("Shutting down μVNC Relay gracefully.")
+}
+
+func printBanner() {
+	banner := `
+ ╔══════════════════════════════════════════════════════════════════╗
+ ║  __  ____      ____  _   _  ____   ____     _                    ║
+ ║ |  \/  \ \    / /  \| \ | |/ ___| |  _ \___| | __ _ _   _        ║
+ ║ | |\/| |\ \  / /| |) |  \| | |     | |_) / _ \ |/ _` + "`" + ` | | | |       ║
+ ║ | |  | | \ \/ / |  _ <| |\  | |___  |  _ <  __/ | (_| | |_| |       ║
+ ║ |_|  |_|  \__/  |_| \_\_| \_|\____| |_| \_\___|_|\__,_|\__, |       ║
+ ║                                                        |___/     ║
+ ║ μVNC Relay %-12s - Ultra-Lightweight VNC Proxy & Gateway ║
+ ╚══════════════════════════════════════════════════════════════════╝
+`
+	fmt.Printf(banner, "v"+Version)
+}
+
+func resolveConfigPath(customPath string) string {
+	if customPath != "" {
+		return customPath
+	}
+
+	// Priority list of standard locations
+	candidates := []string{
+		"/etc/microvnc-relay/config.yaml",
+		"./config.yaml",
+		"./config.example.yaml",
+	}
+
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+
+	return "./config.example.yaml"
+}
+
+func logConfigurationSummary(cfg *config.Config) {
+	slog.Info("Subsystem Feature Flags",
+		"webui", cfg.Features.WebUIEnabled,
+		"topology_map", cfg.Features.TopologyMapEnabled,
+		"novnc", cfg.Features.NoVNCEnabled,
+		"mode1_proxy", cfg.Features.Mode1Enabled,
+		"mode2_reverse", cfg.Features.Mode2Enabled,
+		"latency_probes", cfg.Features.LatencyProbesEnabled,
+		"bandwidth_meter", cfg.Features.BandwidthMeteringEnabled,
+		"dev_debug_bridge", IsDevBuild,
+	)
+
+	slog.Info("Network Configuration",
+		"web_bind", cfg.Server.WebBind,
+		"vnc_bind", cfg.Server.VNCBind,
+		"mode2_reverse_port", cfg.Server.Mode2ReversePort,
+		"mode2_viewer_port", cfg.Server.Mode2ViewerPort,
+		"registered_devices", len(cfg.Devices),
+	)
+
+	slog.Info("Storage & Limits",
+		"disk_logging", cfg.Logging.DiskLogging,
+		"in_memory_log_lines", cfg.Logging.InMemoryBufferLines,
+		"access_control_enabled", cfg.AccessControl.Enabled,
+		"tcp_keepalive_sec", cfg.ConnectionLimits.TCPKeepAliveSec,
+		"dial_timeout_sec", cfg.ConnectionLimits.DialTimeoutSec,
+	)
+}

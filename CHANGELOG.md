@@ -7,15 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Planned (Phase 1: Proof of Concept)
-- Core Go RFB proxy engine supporting Mode 1 (port-mapped) and Mode 2 (UltraVNC reverse ID matchmaking).
-- Linux kernel `splice(2)` zero-copy stream forwarding pipeline.
-- Two-hop latency measurement engine (`TCP_INFO` microsecond kernel RTT and periodic TCP SYN probes).
-- Atomic per-session bandwidth counters (RX/TX).
-- Fixed-capacity circular ring buffers for in-memory event logs and telemetry history.
-- Modular feature toggles supporting Headless Pure Relay mode (<10MB RAM).
-- Embedded WebUI dashboard for device mappings and live traffic meters.
-- Native systemd service unit with memory cgroup ceiling (`MemoryMax=128M`).
+### Added
+- Milestone 1 scaffolding: Go module `github.com/milkboyinchina/microvnc-relay` with pure-Go dependencies (`gopkg.in/yaml.v3`, `golang.org/x/crypto`, `golang.org/x/sys`).
+- Configuration package (`internal/config`) with full YAML parsing, CIDR subnet access control, connection limits, and atomic save via temporary file replacement.
+- Comprehensive unit test suite in `internal/config/config_test.go` verifying access control, port conflict detection, and atomic persistence.
+- Compile-time debug bridge stubs (`cmd/microvnc-relay/debug_dev.go` vs `debug_prod.go`) isolating `pprof` diagnostic routes to `-tags dev` builds.
+- CLI entrypoint (`cmd/microvnc-relay/main.go`) with ASCII startup banner, automatic config resolution, and OS signal handling.
+
 
 ## [0.1.0-alpha] - 2026-10-16
 
