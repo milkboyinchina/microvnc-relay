@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Mode 1 Port-Mapped Proxy manager (`internal/proxy/mode1.go`) with dynamic virtual port binding, live `Reload(devices)` without dropping unchanged listeners, CIDR allowlist enforcement, and initial TCP dial RTT measurement.
   - Mode 2 UltraVNC ID reverse matchmaker (`internal/proxy/mode2.go`) on `:5500` (reverse server pool) and `:5901` (viewer port with `"RFB 000.000\n"` greeting and 250-byte `"ID:xxxx"` handshake parsing).
   - End-to-end integration tests (`internal/proxy/proxy_test.go`) covering Mode 1 forwarding, live listener reload, CIDR rejection, Mode 2 UltraVNC matchmaking, QoS pacing, and idle timeout teardown.
+- Milestone 4 two-hop latency engine (`internal/telemetry`):
+  - Hop 1 (Client $\leftrightarrow$ Relay) zero-packet Linux kernel `TCP_INFO` RTT inspector (`internal/telemetry/tcpinfo_linux.go`) via `unix.GetsockoptTCPInfo(fd, SOL_TCP, TCP_INFO)` with cross-platform fallback stub (`internal/telemetry/tcpinfo_other.go`).
+  - Hop 2 (Relay $\leftrightarrow$ Target) non-intrusive TCP SYN handshake pinger (`internal/telemetry/pinger.go`) with configurable polling interval (`target_ping_interval_sec`), on-demand single-device probe support, Mode 2 waiting-server awareness, and bounded status map pruning.
+  - Unit tests (`internal/telemetry/pinger_test.go`) verifying kernel `TCP_INFO` extraction, online/offline target detection, map pruning, and `latency_probes_enabled: false` feature gating.
 
 
 ## [0.1.0-alpha] - 2026-10-16

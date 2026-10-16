@@ -12,6 +12,7 @@ import (
 	"github.com/milkboyinchina/microvnc-relay/internal/config"
 	"github.com/milkboyinchina/microvnc-relay/internal/logger"
 	"github.com/milkboyinchina/microvnc-relay/internal/proxy"
+	"github.com/milkboyinchina/microvnc-relay/internal/telemetry"
 )
 
 // Version is the current application version (overridden by -ldflags at build time).
@@ -90,6 +91,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Start Two-Hop Latency Engine (Hop 2 TCP SYN pinger; Hop 1 TCP_INFO sampled in meter.SampleTick)
+	pinger := telemetry.NewPinger(
+		cfg,
+		slog.Default(),
+		meter.UpdateDeviceTargetRTT,
+		mode2Mgr.HasPendingServer,
+	)
+	pinger.Start()
+
 	// Setup OS signal handling for clean teardown and SIGHUP config reload
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
@@ -104,6 +114,9 @@ func main() {
 				slog.Error("Failed to reload configuration on SIGHUP", "error", err)
 			} else {
 				_ = mode1Mgr.Reload(reloaded.GetDevices())
+				if cfg.Features.LatencyProbesEnabled {
+					go pinger.ProbeAll()
+				}
 			}
 			continue
 		}
@@ -111,6 +124,7 @@ func main() {
 		break
 	}
 
+	pinger.Stop()
 	mode2Mgr.Stop()
 	mode1Mgr.Stop()
 	close(stopMeter)

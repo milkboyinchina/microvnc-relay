@@ -300,8 +300,20 @@ func (tm *TrafficMeter) ForEachSession(fn func(*Session)) {
 	}
 }
 
-// SampleTick should be called once per second (1Hz) to update instantaneous bytes/sec
-// and record 1-minute buckets into the 24-hour ring buffer.
+// UpdateDeviceTargetRTT updates the Hop 2 TargetRTT on all active sessions routed to deviceID.
+func (tm *TrafficMeter) UpdateDeviceTargetRTT(deviceID string, rtt time.Duration) {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+
+	for _, s := range tm.sessions {
+		if s.DeviceID == deviceID {
+			s.SetTargetRTT(rtt)
+		}
+	}
+}
+
+// SampleTick should be called once per second (1Hz) to update instantaneous bytes/sec,
+// sample Hop 1 kernel TCP_INFO RTT for active sessions, and record 1-minute buckets into the 24-hour ring buffer.
 func (tm *TrafficMeter) SampleTick() {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
@@ -336,6 +348,12 @@ func (tm *TrafficMeter) SampleTick() {
 		s.lastTxBytes = sTx
 		s.rxBytesSec.Store(sDeltaRx)
 		s.txBytesSec.Store(sDeltaTx)
+
+		if conn := s.ClientConn(); conn != nil {
+			if rtt, err := telemetry.ExtractTCPInfoRTT(conn); err == nil && rtt > 0 {
+				s.SetClientRTT(rtt)
+			}
+		}
 	}
 
 	tm.minuteRxAccum += deltaRx
