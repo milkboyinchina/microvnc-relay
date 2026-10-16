@@ -18,6 +18,15 @@ Engineered specifically for **ARMv7** (Raspberry Pi 2, Orange Pi Zero LTS, 32-bi
 - **Embedded WebUI & noVNC**: Self-contained web interface with device routing, real-time bandwidth gauges, and optional 1-click in-browser HTML5 remote control.
 - **NetBird VPN Compatible**: Operates seamlessly over NetBird WireGuard mesh overlays (`wt0`), local LAN, or public networks.
 
+## Why VNC in 2026?
+
+Modern remote desktop solutions (RustDesk, WebRTC, Parsec) rely on continuous video streaming (H.264/HEVC). While effective for workstation-grade hardware, they break down in resource-constrained edge environments:
+
+- **Software video encoders overwhelm low-power CPUs**: A 900MHz Cortex-A7 (Raspberry Pi 2) or 256MB RAM single-board computer lacks dedicated hardware video encoders. Running H.264/VP9 software encoding pins CPU cores at 100% and rapidly triggers out-of-memory (OOM) crashes.
+- **VNC only transmits screen changes (dirty rectangles)**: By updating only changed pixel bounding boxes with lightweight tile compression (`Tight`/`ZRLE`), VNC servers run comfortably on ~15MB RAM with negligible CPU overhead.
+- **Zero-copy kernel relaying (`splice(2)`)**: Because RFB is a byte-stream protocol, μVNC Relay pipes packets directly between kernel TCP socket buffers without decoding or re-compressing frames, keeping CPU load < 2%.
+- **Modern networking solves VNC's historic weaknesses**: The classic downsides of VNC—unencrypted cleartext sessions and lack of NAT traversal—are cleanly resolved by pairing it with kernel-level WireGuard mesh overlays (**NetBird**). Transport encryption (ChaCha20-Poly1305) and NAT punch-through are offloaded to the kernel, delivering modern security with zero protocol bloat.
+
 ---
 
 ## Why μVNC Relay? Architecture & Tool Comparison
