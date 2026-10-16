@@ -6,8 +6,9 @@ build/
 *.exe~
 *.dll
 *.so
-*.dylib
 vnc-repeater*
+microvnc-relay*
+uvnc-relay*
 
 # Go artifacts
 *.test

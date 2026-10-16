@@ -10,6 +10,10 @@ features:
   # Set to false to run in "Headless Pure Relay" mode (~6MB - 10MB RAM)
   webui_enabled: true
 
+  # Interactive visual network topology map (SVG/Canvas node graph)
+  # Set to false to use plain table view and save browser/client rendering
+  topology_map_enabled: true
+
   # In-browser noVNC HTML5 viewer and WebSocket-to-TCP bridge (/ws/vnc/*)
   # Disable if you only use native desktop VNC clients to save WebSocket buffers
   novnc_enabled: true
@@ -49,14 +53,43 @@ server:
 # Authentication & Security
 # ==============================================================================
 security:
-  # Protect WebUI with session password authentication
-  auth_enabled: false
+  # Protect WebUI with session password authentication (Recommended: true)
+  auth_enabled: true
   username: "admin"
-  # Bcrypt hash or plain text on first launch (auto-hashed on startup)
+  # Default password: "admin" (BCrypt hash). Change on first startup!
   password_hash: "$2a$12$e8N4O1.UqMh0z7e5k8aE1.9JgU6P8f2K4r3B1t0y9u8i7o6p5q4w3"
   
   # Session timeout in minutes
   session_timeout_minutes: 1440
+
+# ==============================================================================
+# Access Control & Subnet Whitelist
+# ==============================================================================
+access_control:
+  # Restrict incoming connections to specific subnets (CIDR notation)
+  # Connections from unlisted subnets are rejected immediately at TCP handshake
+  enabled: false
+  allowed_subnets:
+    - "100.64.0.0/10"   # NetBird Mesh Overlay
+    - "192.168.0.0/16"  # Local LAN (e.g. 192.168.1.x)
+    - "10.0.0.0/8"      # Private Network
+    - "127.0.0.1/32"    # Loopback
+
+# ==============================================================================
+# Connection Timeouts & QoS Bandwidth Limits
+# ==============================================================================
+connection_limits:
+  # TCP keepalive interval to detect and terminate zombie/dropped connections
+  tcp_keepalive_sec: 30
+
+  # Connect timeout when probing or establishing link to target VNC servers
+  dial_timeout_sec: 5
+
+  # Idle timeout in seconds before closing inactive client sockets (0 = disabled)
+  idle_timeout_sec: 0
+
+  # Optional per-session bandwidth cap in KB/s to prevent network choking (0 = unlimited)
+  max_session_kbps: 0
 
 # ==============================================================================
 # Logging & Storage (Flash Wear Protection)

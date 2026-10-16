@@ -75,11 +75,12 @@ To accommodate the most resource-constrained edge hardware (e.g. Orange Pi Zero 
 ```yaml
 features:
   webui_enabled: true             # Set false for Headless Pure Relay (~6-10MB RAM)
+  topology_map_enabled: true      # Set false to disable Canvas/SVG map and use simple table
   novnc_enabled: true             # Set false to disable WebSocket-to-TCP bridge
   mode1_enabled: true             # Mode 1 direct port mapping
   mode2_enabled: true             # Mode 2 reverse ID listener (ports 5500 & 5901)
   latency_probes_enabled: true    # Background TCP SYN polling
-  bandwidth_metering_enabled: true# Atomic RX/TX throughput counters
+  bandwidth_metering_enabled: true # Atomic RX/TX throughput counters
 ```
 
 ### Memory Footprint Profiles
@@ -132,3 +133,50 @@ To ensure the daemon runs 24/7 indefinitely without memory growth or SD card fai
 - **Containerized (Docker - Phase 2)**:
   - Policy: `restart: unless-stopped`.
   - Resumes automatically across power cuts and host reboots while respecting manual administrative shutdowns.
+
+---
+
+## 9. Go Codebase Architecture & Directory Layout
+
+```
+microvnc-relay/
+├── cmd/
+│   └── microvnc-relay/
+│       ├── main.go               # CLI entrypoint, signal handling, lifecycle
+│       ├── debug_dev.go          # Development debug bridge (//go:build dev)
+│       └── debug_prod.go         # Production no-op stubs (//go:build !dev)
+├── internal/
+│   ├── config/                   # YAML parsing, validation, and feature flags
+│   ├── proxy/                    # RFB Mode 1, Mode 2 pool, zero-copy splice relay
+│   ├── telemetry/                # TCP_INFO RTT, TCP SYN pingers, ring buffers
+│   └── web/                      # REST API, auth session middleware, noVNC bridge
+├── web/                          # WebUI frontend source (HTML/CSS/JS/Svelte)
+│   └── dist/                     # Compiled SPA assets embedded into Go binary
+├── blueprints/
+│   └── BLUEPRINT.md
+├── .gitignore
+├── LICENSE
+├── README.md
+└── config.example.yaml
+```
+
+---
+
+## 10. REST & WebSocket API Contract
+
+All REST endpoints return JSON and are mounted under `/api/v1` (active when `features.webui_enabled: true`):
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/v1/devices` | List registered VNC targets with live status & latency |
+| `POST` | `/api/v1/devices` | Add new target machine |
+| `PUT` | `/api/v1/devices/{id}` | Update existing target configuration |
+| `DELETE` | `/api/v1/devices/{id}` | Remove registered device |
+| `POST` | `/api/v1/devices/{id}/test` | Trigger immediate TCP SYN latency test |
+| `GET` | `/api/v1/sessions` | List active VNC client connections with RX/TX & RTT |
+| `DELETE` | `/api/v1/sessions/{id}` | Force disconnect an active VNC session |
+| `GET` | `/api/v1/metrics` | System snapshot (memory RSS, CPU %, cumulative bandwidth) |
+| `GET` | `/api/v1/logs` | Fetch recent log lines from in-memory ring buffer |
+| `POST` | `/api/v1/system/reset-counters`| Reset cumulative byte meters and 24h graph |
+| `WS` | `/api/v1/ws/telemetry` | 1Hz streaming JSON telemetry to WebUI dashboard |
+| `WS` | `/ws/vnc/{id}` | Binary RFB-over-WebSocket bridge for in-browser noVNC |
