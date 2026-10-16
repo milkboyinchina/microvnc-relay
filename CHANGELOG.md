@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive unit test suite in `internal/config/config_test.go` verifying access control, port conflict detection, and atomic persistence.
 - Compile-time debug bridge stubs (`cmd/microvnc-relay/debug_dev.go` vs `debug_prod.go`) isolating `pprof` diagnostic routes to `-tags dev` builds.
 - CLI entrypoint (`cmd/microvnc-relay/main.go`) with ASCII startup banner, automatic config resolution, and OS signal handling.
+- Milestone 2 ephemeral state & telemetry foundation:
+  - Generic thread-safe fixed-capacity circular ring buffer (`internal/telemetry/ringbuffer.go`) with $O(1)$ overwrite and zero unbounded slice growth.
+  - Dual structured `slog.Handler` (`internal/logger/logger.go`) writing to `stderr` and an in-memory ring buffer (default 500 lines) with optional size-rotated disk logging (`disk_logging: false` by default).
+  - Atomic byte metering, active session registry, and 1,440-slot (24h) bandwidth history ring buffer (`internal/proxy/meter.go`).
 
 
 ## [0.1.0-alpha] - 2026-10-16

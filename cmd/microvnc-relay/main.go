@@ -7,8 +7,11 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/milkboyinchina/microvnc-relay/internal/config"
+	"github.com/milkboyinchina/microvnc-relay/internal/logger"
+	"github.com/milkboyinchina/microvnc-relay/internal/proxy"
 )
 
 // Version is the current application version (overridden by -ldflags at build time).
@@ -35,15 +38,42 @@ func main() {
 
 	// Locate config file
 	resolvedConfig := resolveConfigPath(configPath)
-	slog.Info("Loading configuration", "path", resolvedConfig)
 
 	cfg, err := config.Load(resolvedConfig)
 	if err != nil {
-		slog.Error("Failed to load configuration", "error", err)
+		slog.Error("Failed to load configuration", "path", resolvedConfig, "error", err)
 		os.Exit(1)
 	}
 
+	// Initialize dual logger (stderr + fixed O(1) in-memory ring buffer)
+	appLogger, err := logger.New(cfg.Logging, os.Stderr)
+	if err != nil {
+		slog.Error("Failed to initialize logger", "error", err)
+		os.Exit(1)
+	}
+	defer appLogger.Close()
+	appLogger.SetAsDefault()
+
+	slog.Info("Loaded configuration", "path", resolvedConfig)
 	logConfigurationSummary(cfg)
+
+	// Initialize traffic meter and 24h ring buffer
+	meter := proxy.NewTrafficMeter(cfg.Features.BandwidthMeteringEnabled)
+	stopMeter := make(chan struct{})
+	if cfg.Features.BandwidthMeteringEnabled {
+		go func() {
+			ticker := time.NewTicker(1 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					meter.SampleTick()
+				case <-stopMeter:
+					return
+				}
+			}
+		}()
+	}
 
 	// Setup OS signal handling for clean teardown
 	sigChan := make(chan os.Signal, 1)
@@ -53,6 +83,7 @@ func main() {
 
 	sig := <-sigChan
 	slog.Info("Received shutdown signal", "signal", sig.String())
+	close(stopMeter)
 	slog.Info("Shutting down μVNC Relay gracefully.")
 }
 
