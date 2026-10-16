@@ -75,14 +75,44 @@ func main() {
 		}()
 	}
 
-	// Setup OS signal handling for clean teardown
+	// Start Mode 1 Port-Mapped Proxy Engine
+	mode1Mgr := proxy.NewMode1Manager(cfg, meter, slog.Default())
+	if err := mode1Mgr.Start(); err != nil {
+		slog.Warn("One or more Mode 1 listeners failed to bind at startup", "error", err)
+	}
+
+	// Start Mode 2 UltraVNC ID Reverse Matchmaker
+	mode2Mgr := proxy.NewMode2Manager(cfg, meter, slog.Default())
+	if err := mode2Mgr.Start(); err != nil {
+		slog.Error("Failed to start Mode 2 repeater listeners", "error", err)
+		mode1Mgr.Stop()
+		close(stopMeter)
+		os.Exit(1)
+	}
+
+	// Setup OS signal handling for clean teardown and SIGHUP config reload
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 
 	slog.Info("μVNC Relay initialized successfully. Waiting for shutdown signal...")
 
-	sig := <-sigChan
-	slog.Info("Received shutdown signal", "signal", sig.String())
+	for {
+		sig := <-sigChan
+		if sig == syscall.SIGHUP {
+			slog.Info("Received SIGHUP, reloading configuration", "path", resolvedConfig)
+			if reloaded, err := config.Load(resolvedConfig); err != nil {
+				slog.Error("Failed to reload configuration on SIGHUP", "error", err)
+			} else {
+				_ = mode1Mgr.Reload(reloaded.GetDevices())
+			}
+			continue
+		}
+		slog.Info("Received shutdown signal", "signal", sig.String())
+		break
+	}
+
+	mode2Mgr.Stop()
+	mode1Mgr.Stop()
 	close(stopMeter)
 	slog.Info("Shutting down μVNC Relay gracefully.")
 }

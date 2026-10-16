@@ -66,8 +66,24 @@ type Session struct {
 	txBytesSec      atomic.Uint64
 	clientRTTMicros atomic.Int64
 	targetRTTMicros atomic.Int64
+	connMu          sync.RWMutex
+	clientConn      net.Conn
 	disconnectOnce  sync.Once
 	disconnectFn    func()
+}
+
+// SetClientConn associates the client TCP connection with the session for Hop 1 TCP_INFO inspection.
+func (s *Session) SetClientConn(conn net.Conn) {
+	s.connMu.Lock()
+	s.clientConn = conn
+	s.connMu.Unlock()
+}
+
+// ClientConn returns the underlying client connection for Hop 1 TCP_INFO inspection.
+func (s *Session) ClientConn() net.Conn {
+	s.connMu.RLock()
+	defer s.connMu.RUnlock()
+	return s.clientConn
 }
 
 // AddRx atomically increments viewer-to-target byte counters.
@@ -272,6 +288,16 @@ func (tm *TrafficMeter) ActiveSessionCountForDevice(deviceID string) int {
 		}
 	}
 	return count
+}
+
+// ForEachSession invokes fn for each currently active session under a read lock.
+func (tm *TrafficMeter) ForEachSession(fn func(*Session)) {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+
+	for _, s := range tm.sessions {
+		fn(s)
+	}
 }
 
 // SampleTick should be called once per second (1Hz) to update instantaneous bytes/sec

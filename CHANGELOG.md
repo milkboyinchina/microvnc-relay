@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Generic thread-safe fixed-capacity circular ring buffer (`internal/telemetry/ringbuffer.go`) with $O(1)$ overwrite and zero unbounded slice growth.
   - Dual structured `slog.Handler` (`internal/logger/logger.go`) writing to `stderr` and an in-memory ring buffer (default 500 lines) with optional size-rotated disk logging (`disk_logging: false` by default).
   - Atomic byte metering, active session registry, and 1,440-slot (24h) bandwidth history ring buffer (`internal/proxy/meter.go`).
+- Milestone 3 core RFB proxy engine (`internal/proxy`):
+  - Bidirectional stream forwarder (`internal/proxy/forwarder.go`) with deadlock-free socket teardown, Linux kernel `splice(2)` zero-copy in unmetered headless mode, and zero-allocation 32KB `sync.Pool` buffers for real-time byte metering, QoS bandwidth caps (`max_session_kbps`), and idle timeout enforcement (`idle_timeout_sec`).
+  - Mode 1 Port-Mapped Proxy manager (`internal/proxy/mode1.go`) with dynamic virtual port binding, live `Reload(devices)` without dropping unchanged listeners, CIDR allowlist enforcement, and initial TCP dial RTT measurement.
+  - Mode 2 UltraVNC ID reverse matchmaker (`internal/proxy/mode2.go`) on `:5500` (reverse server pool) and `:5901` (viewer port with `"RFB 000.000\n"` greeting and 250-byte `"ID:xxxx"` handshake parsing).
+  - End-to-end integration tests (`internal/proxy/proxy_test.go`) covering Mode 1 forwarding, live listener reload, CIDR rejection, Mode 2 UltraVNC matchmaking, QoS pacing, and idle timeout teardown.
 
 
 ## [0.1.0-alpha] - 2026-10-16
