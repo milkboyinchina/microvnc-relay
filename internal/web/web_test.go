@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -322,3 +323,108 @@ func TestWebSocketTelemetryUpgrade(t *testing.T) {
 		t.Fatalf("expected Sec-WebSocket-Accept header in: %s", respStr)
 	}
 }
+
+func TestFirstRunAuthSetupAndReset(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := tmpDir + "/config.yaml"
+	authPath := tmpDir + "/auth.json"
+
+	cfg := config.DefaultConfig()
+	cfg.Server.WebBind = "127.0.0.1:0"
+	cfg.Features.WebUIEnabled = true
+	cfg.Security.AuthEnabled = true
+	cfg.Security.PasswordHash = "" // Trigger setup_required!
+
+	meter := proxy.NewTrafficMeter(false)
+	appLogger, _ := logger.New(cfg.Logging, io.Discard)
+	pinger := telemetry.NewPinger(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+
+	server, err := NewServer(cfg, configPath, meter, pinger, appLogger, nil, "0.1.0-test")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	if err := server.Start(); err != nil {
+		t.Fatalf("server.Start: %v", err)
+	}
+	defer server.Stop(context.Background())
+
+	addr := "http://" + server.Addr()
+
+	// 1. GET /api/v1/auth/status -> setup_required: true
+	resp, err := http.Get(addr + "/api/v1/auth/status")
+	if err != nil {
+		t.Fatalf("GET /auth/status: %v", err)
+	}
+	var st struct {
+		AuthEnabled   bool `json:"auth_enabled"`
+		Authenticated bool `json:"authenticated"`
+		SetupRequired bool `json:"setup_required"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&st)
+	_ = resp.Body.Close()
+
+	if !st.SetupRequired {
+		t.Fatal("expected setup_required: true on first run with empty password")
+	}
+
+	// 2. Access protected endpoint before setup -> 403 Forbidden
+	respDev, err := http.Get(addr + "/api/v1/devices")
+	if err != nil {
+		t.Fatalf("GET /devices: %v", err)
+	}
+	_ = respDev.Body.Close()
+	if respDev.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden before setup, got %d", respDev.StatusCode)
+	}
+
+	// 3. POST /api/v1/auth/setup -> creates auth.json and logs in
+	setupPayload, _ := json.Marshal(map[string]string{
+		"username": "admin",
+		"password": "mypassword123",
+	})
+	respSetup, err := http.Post(addr+"/api/v1/auth/setup", "application/json", bytes.NewReader(setupPayload))
+	if err != nil {
+		t.Fatalf("POST /auth/setup: %v", err)
+	}
+	defer respSetup.Body.Close()
+	if respSetup.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK from setup, got %d", respSetup.StatusCode)
+	}
+
+	// Verify auth.json was created on disk
+	if _, err := os.Stat(authPath); err != nil {
+		t.Fatalf("expected auth.json to exist at %s: %v", authPath, err)
+	}
+
+	// Verify session cookie was returned
+	cookies := respSetup.Cookies()
+	var sessCookie *http.Cookie
+	for _, c := range cookies {
+		if c.Name == sessionCookieName {
+			sessCookie = c
+			break
+		}
+	}
+	if sessCookie == nil {
+		t.Fatal("expected session cookie after setup")
+	}
+
+	// 4. Subsequent GET /api/v1/auth/status with cookie -> setup_required: false, authenticated: true
+	req, _ := http.NewRequest(http.MethodGet, addr+"/api/v1/auth/status", nil)
+	req.AddCookie(sessCookie)
+	respAuthed, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("authed status: %v", err)
+	}
+	var stAuthed struct {
+		SetupRequired bool `json:"setup_required"`
+		Authenticated bool `json:"authenticated"`
+	}
+	_ = json.NewDecoder(respAuthed.Body).Decode(&stAuthed)
+	_ = respAuthed.Body.Close()
+
+	if stAuthed.SetupRequired || !stAuthed.Authenticated {
+		t.Fatalf("unexpected authed state: %+v", stAuthed)
+	}
+}
+

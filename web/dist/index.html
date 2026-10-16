@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>μVNC Relay Dashboard</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <!-- Top Navigation & System Status Bar -->
+  <header class="header">
+    <div class="header-brand">
+      <div class="logo-badge">μVNC</div>
+      <div class="brand-text">
+        <h1>μVNC Relay</h1>
+        <span class="subtitle" id="relay-version">v0.1.0-alpha</span>
+      </div>
+    </div>
+    <div class="header-metrics">
+      <div class="metric-pill">
+        <span class="pill-label">Uptime</span>
+        <span class="pill-value" id="uptime-val">0s</span>
+      </div>
+      <div class="metric-pill">
+        <span class="pill-label">RSS RAM</span>
+        <span class="pill-value" id="memory-val">0 MB</span>
+      </div>
+      <div class="metric-pill">
+        <span class="pill-label">Sessions</span>
+        <span class="pill-value highlight" id="sessions-count-val">0</span>
+      </div>
+      <div class="metric-pill">
+        <span class="pill-label">Throughput</span>
+        <span class="pill-value" id="rate-summary-val">RX: 0 B/s | TX: 0 B/s</span>
+      </div>
+      <button class="btn btn-outline" id="btn-reset-counters" title="Reset byte counters and 24h history">Reset Meters</button>
+      <button class="btn btn-outline danger" id="btn-logout" style="display: none;">Logout</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- Live Traffic & Subsystem Status Banner -->
+    <section class="card mb-4">
+      <div class="card-header">
+        <h2>Live Traffic Meter & Telemetry</h2>
+        <div class="header-badges">
+          <span class="status-indicator live" id="ws-status-badge">● WebSocket Live</span>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="stats-grid">
+          <div class="stat-box">
+            <span class="stat-title">Instantaneous RX (Inbound)</span>
+            <span class="stat-num" id="stat-rx-rate">0 KB/s</span>
+            <span class="stat-sub" id="stat-rx-total">Total: 0 MB</span>
+          </div>
+          <div class="stat-box">
+            <span class="stat-title">Instantaneous TX (Outbound)</span>
+            <span class="stat-num" id="stat-tx-rate">0 KB/s</span>
+            <span class="stat-sub" id="stat-tx-total">Total: 0 MB</span>
+          </div>
+          <div class="stat-box">
+            <span class="stat-title">Active Proxy Streams</span>
+            <span class="stat-num" id="stat-active-streams">0</span>
+            <span class="stat-sub">Zero-Copy Kernel Splice</span>
+          </div>
+          <div class="stat-box">
+            <span class="stat-title">Hardware Profile</span>
+            <span class="stat-num" id="stat-arch-info">ARMv7 / Linux</span>
+            <span class="stat-sub">&lt; 35MB Strict Budget</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Registered Devices Table Card -->
+    <section class="card mb-4">
+      <div class="card-header">
+        <div class="title-with-count">
+          <h2>Registered VNC Targets</h2>
+          <span class="badge" id="devices-badge-count">0</span>
+        </div>
+        <button class="btn btn-primary" id="btn-add-device">+ Add Target</button>
+      </div>
+      <div class="card-body p-0">
+        <div class="table-responsive">
+          <table class="table" id="devices-table">
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Device ID &amp; Name</th>
+                <th>Mode</th>
+                <th>Target Host : Port</th>
+                <th>Virtual Port / Mode 2 ID</th>
+                <th>Hop 2 Target RTT</th>
+                <th class="text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="devices-tbody">
+              <tr>
+                <td colspan="7" class="text-center py-4 text-muted">Loading registered devices...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Active Sessions Table Card -->
+    <section class="card mb-4">
+      <div class="card-header">
+        <div class="title-with-count">
+          <h2>Active VNC Client Sessions</h2>
+          <span class="badge" id="sessions-badge-count">0</span>
+        </div>
+      </div>
+      <div class="card-body p-0">
+        <div class="table-responsive">
+          <table class="table" id="sessions-table">
+            <thead>
+              <tr>
+                <th>Session ID</th>
+                <th>Device</th>
+                <th>Mode</th>
+                <th>Client IP (Hop 1 RTT)</th>
+                <th>Target IP (Hop 2 RTT)</th>
+                <th>RX / TX Speed</th>
+                <th>Duration</th>
+                <th class="text-right">Action</th>
+              </tr>
+            </thead>
+            <tbody id="sessions-tbody">
+              <tr>
+                <td colspan="8" class="text-center py-4 text-muted">No active VNC client streams connected.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- In-Memory Circular Event Log Card -->
+    <section class="card mb-4">
+      <div class="card-header">
+        <div class="title-with-count">
+          <h2>Recent Event Logs (In-Memory Ring Buffer)</h2>
+          <span class="badge secondary">RAM Only - Zero Disk Wear</span>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-sm btn-outline" id="btn-refresh-logs">Refresh</button>
+          <button class="btn btn-sm btn-outline danger" id="btn-clear-logs">Clear Logs</button>
+        </div>
+      </div>
+      <div class="card-body p-0">
+        <div class="log-viewer" id="log-viewer">
+          <pre id="log-content" class="log-pre">Loading recent logs...</pre>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Add / Edit Device Modal -->
+  <div class="modal-backdrop" id="device-modal" style="display: none;">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h3 id="device-modal-title">Add VNC Target</h3>
+        <button class="modal-close" id="modal-close-btn">&times;</button>
+      </div>
+      <form id="device-form">
+        <div class="modal-body">
+          <input type="hidden" id="form-is-edit" value="false">
+          <div class="form-group">
+            <label for="form-dev-id">Device ID (Unique Slug)</label>
+            <input type="text" id="form-dev-id" class="form-control" placeholder="e.g. pi2-workbench" required>
+            <small class="form-help">Unique lowercase alphanumeric identifier.</small>
+          </div>
+          <div class="form-group">
+            <label for="form-dev-name">Display Name</label>
+            <input type="text" id="form-dev-name" class="form-control" placeholder="e.g. Workbench Pi 2" required>
+          </div>
+          <div class="form-row">
+            <div class="form-group col">
+              <label for="form-dev-host">Target Host / IP</label>
+              <input type="text" id="form-dev-host" class="form-control" placeholder="127.0.0.1 or 192.168.1.50" required>
+            </div>
+            <div class="form-group col">
+              <label for="form-dev-port">Target Port</label>
+              <input type="number" id="form-dev-port" class="form-control" value="5900" min="1" max="65535" required>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group col">
+              <label for="form-dev-vport">Mode 1 Virtual Port (Listen Port)</label>
+              <input type="number" id="form-dev-vport" class="form-control" placeholder="5910 (0 to disable)" min="0" max="65535" value="0">
+              <small class="form-help">Dedicated incoming port (e.g. :5910 ➔ Target:5900).</small>
+            </div>
+            <div class="form-group col">
+              <label for="form-dev-mode2id">Mode 2 UltraVNC ID</label>
+              <input type="number" id="form-dev-mode2id" class="form-control" placeholder="1234 (0 to disable)" min="0" max="999999" value="0">
+              <small class="form-help">Reverse ID token for NAT machines dialing out.</small>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="checkbox-label">
+              <input type="checkbox" id="form-dev-enabled" checked>
+              <span>Enable this device routing</span>
+            </label>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline" id="modal-cancel-btn">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="modal-submit-btn">Save Device</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Login Modal -->
+  <div class="modal-backdrop" id="login-modal" style="display: none;">
+    <div class="modal-dialog modal-sm">
+      <div class="modal-header">
+        <h3>Authentication Required</h3>
+      </div>
+      <form id="login-form">
+        <div class="modal-body">
+          <div class="alert danger" id="login-error" style="display: none;">Invalid credentials</div>
+          <div class="form-group">
+            <label for="login-username">Username</label>
+            <input type="text" id="login-username" class="form-control" required autocomplete="username">
+          </div>
+          <div class="form-group">
+            <label for="login-password">Password</label>
+            <input type="password" id="login-password" class="form-control" required autocomplete="current-password">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="submit" class="btn btn-primary w-100">Sign In</button>
+        </div>
+      </form>
+  <!-- First-Run Setup Modal -->
+  <div class="modal-backdrop" id="setup-modal" style="display: none;">
+    <div class="modal-dialog modal-sm">
+      <div class="modal-header">
+        <h3>Initial Admin Setup</h3>
+      </div>
+      <form id="setup-form">
+        <div class="modal-body">
+          <p class="text-muted" style="font-size: 13px;">Create an administrator username and password to secure your relay.</p>
+          <div class="alert danger" id="setup-error" style="display: none;"></div>
+          <div class="form-group">
+            <label for="setup-username">Username</label>
+            <input type="text" id="setup-username" class="form-control" value="admin" required autocomplete="username">
+          </div>
+          <div class="form-group">
+            <label for="setup-password">Password (min 6 chars)</label>
+            <input type="password" id="setup-password" class="form-control" required minlength="6" autocomplete="new-password">
+          </div>
+          <div class="form-group">
+            <label for="setup-password-confirm">Confirm Password</label>
+            <input type="password" id="setup-password-confirm" class="form-control" required minlength="6" autocomplete="new-password">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="submit" class="btn btn-primary w-100">Set Password &amp; Continue</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

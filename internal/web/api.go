@@ -60,6 +60,7 @@ func NewAPIHandler(
 func (a *APIHandler) RegisterRoutes(mux *http.ServeMux) {
 	// Public auth endpoints
 	mux.HandleFunc("/api/v1/auth/status", a.handleAuthStatus)
+	mux.HandleFunc("/api/v1/auth/setup", a.handleAuthSetup)
 	mux.HandleFunc("/api/v1/login", a.handleLogin)
 	mux.HandleFunc("/api/v1/logout", a.handleLogout)
 
@@ -88,10 +89,42 @@ func (a *APIHandler) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	authenticated := !a.cfg.Security.AuthEnabled || (err == nil && a.auth.ValidateSession(cookie.Value))
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"auth_enabled":  a.cfg.Security.AuthEnabled,
-		"authenticated": authenticated,
-		"version":       a.version,
+		"auth_enabled":   a.cfg.Security.AuthEnabled,
+		"authenticated":  authenticated,
+		"setup_required": a.auth.SetupRequired(),
+		"version":        a.version,
 	})
+}
+
+func (a *APIHandler) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if !a.auth.SetupRequired() {
+		writeError(w, http.StatusBadRequest, "Administrator credentials have already been configured")
+		return
+	}
+
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid JSON payload")
+		return
+	}
+
+	if err := a.auth.SetAdminCredentials(req.Username, req.Password); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	token := a.auth.CreateSession(req.Username)
+	a.auth.SetSessionCookie(w, token)
+
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (a *APIHandler) handleLogin(w http.ResponseWriter, r *http.Request) {

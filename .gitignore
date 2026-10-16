@@ -1,7 +1,7 @@
 # Binaries and build artifacts
-bin/
-dist/
-build/
+/bin/
+/dist/
+/build/
 *.exe
 *.exe~
 *.dll
@@ -15,8 +15,7 @@ build/
 *.out
 go.work
 
-# Frontend build artifacts
-web/dist/
+# Frontend dependencies
 web/node_modules/
 
 # Logs and runtime config

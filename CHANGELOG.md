@@ -34,8 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Integration test suite (`internal/web/web_test.go`) verifying static asset serving, auth protection, device CRUD, session termination, and WebSocket upgrades.
 - Milestone 6 systemd service & deployment assets (`packaging/systemd`, `scripts`):
   - Systemd service unit (`packaging/systemd/microvnc-relay.service`) with `MemoryMax=128M` cgroup ceiling, `GOMEMLIMIT=48MiB`, `Restart=always`, and `After=network-online.target netbird.service`.
-  - Deployment installer (`scripts/install-systemd.sh`) and Raspberry Pi 2 resource envelope acceptance verification script (`scripts/verify-pi2.sh`).
   - Multi-target static cross-compilation matrix verification across `linux/arm` (`GOARM=7`), `linux/arm64`, `linux/amd64`, and `windows/amd64`.
+- WebUI Dashboard & Authentication Hardening:
+  - Fixed missing `json:"..."` struct tags on `config.DeviceConfig` preventing target attributes (`virtual_port`, `enabled`, `mode2_id`) from serializing and binding properly.
+  - Implemented First-Run WebUI Administrator Setup modal (`#setup-modal`) and `POST /api/v1/auth/setup` endpoint to securely configure credentials without plaintext defaults.
+  - Added dedicated `auth.json` file storage (`0600` permissions) with automatic bcrypt hashing and simple file-deletion password reset capability (`rm auth.json`).
+  - Added frontend fallback handling in `web/dist/app.js` and added `TestFirstRunAuthSetupAndReset` integration test.
+
+
 
 
 ## [0.1.0-alpha] - 2026-10-16

@@ -72,14 +72,14 @@ type TelemetryConfig struct {
 
 // DeviceConfig specifies an upstream VNC target machine.
 type DeviceConfig struct {
-	ID            string `yaml:"id"`
-	Name          string `yaml:"name"`
-	Host          string `yaml:"host"`
-	Port          int    `yaml:"port"`
-	VirtualPort   int    `yaml:"virtual_port"`
-	Mode2ID       int    `yaml:"mode2_id"`
-	VNCServerType string `yaml:"vnc_server_type"`
-	Enabled       bool   `yaml:"enabled"`
+	ID            string `yaml:"id" json:"id"`
+	Name          string `yaml:"name" json:"name"`
+	Host          string `yaml:"host" json:"host"`
+	Port          int    `yaml:"port" json:"port"`
+	VirtualPort   int    `yaml:"virtual_port" json:"virtual_port"`
+	Mode2ID       int    `yaml:"mode2_id" json:"mode2_id"`
+	VNCServerType string `yaml:"vnc_server_type" json:"vnc_server_type"`
+	Enabled       bool   `yaml:"enabled" json:"enabled"`
 }
 
 // Config is the root application configuration structure.

@@ -44,7 +44,7 @@ func NewServer(
 	mode1Reloader func([]config.DeviceConfig) error,
 	version string,
 ) (*Server, error) {
-	auth := NewAuthManager(cfg)
+	auth := NewAuthManager(cfg, configPath)
 	wsHub := NewWSHub()
 
 	api := NewAPIHandler(
