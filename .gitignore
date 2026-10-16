@@ -36,3 +36,7 @@ AGENTS.md
 GEMINI.md
 .agents/
 .agent/
+
+# agents boilerplate
+agents-boilerplate/
+.protocol

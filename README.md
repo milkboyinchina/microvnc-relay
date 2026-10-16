@@ -87,6 +87,9 @@ OR THE USE, MISUSE, INABILITY TO USE, OR OTHER DEALINGS IN THE SOFTWARE.
 The full technical architecture, memory budgeting, protocol mechanics, and build tag configurations are detailed in:
 - **[blueprints/BLUEPRINT.md](blueprints/BLUEPRINT.md)**
 
+Project history and release notes:
+- **[CHANGELOG.md](CHANGELOG.md)**
+
 Sample configuration:
 - **[config.example.yaml](config.example.yaml)**
 
