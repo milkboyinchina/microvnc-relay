@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -47,5 +48,93 @@ func TestLoginRateLimiterLockoutAndReset(t *testing.T) {
 	isLocked, _, _ = limiter.Check(testIP)
 	if isLocked {
 		t.Fatalf("expected clean state after RecordSuccess")
+	}
+}
+
+func TestLoginRateLimiterGroupsIPv6BySlash64(t *testing.T) {
+	limiter := NewLoginRateLimiter()
+	for i := 0; i < limiter.maxAttempts; i++ {
+		limiter.RecordFailure("2001:db8:1:2:3:4:5:6")
+	}
+
+	// Same /64, different host bits: must share the lockout.
+	if locked, _, _ := limiter.Check("2001:db8:1:2:ffff::1"); !locked {
+		t.Fatal("expected addresses in the same /64 to share a lockout")
+	}
+
+	// Different /64: must not be locked.
+	if locked, _, _ := limiter.Check("2001:db8:1:3::1"); locked {
+		t.Fatal("addresses in a different /64 must not share a lockout")
+	}
+}
+
+func TestLoginRateLimiterNormalizesIPv4MappedIPv6(t *testing.T) {
+	limiter := NewLoginRateLimiter()
+	for i := 0; i < limiter.maxAttempts; i++ {
+		limiter.RecordFailure("::ffff:192.168.1.5")
+	}
+
+	if locked, _, _ := limiter.Check("192.168.1.5"); !locked {
+		t.Fatal("IPv4 and IPv4-mapped IPv6 must share a lockout bucket")
+	}
+}
+
+func TestLoginRateLimiterEvictsLeastOffendingUnlockedEntry(t *testing.T) {
+	limiter := NewLoginRateLimiter()
+	now := time.Now()
+
+	limiter.mu.Lock()
+	for i := 0; i < maxTrackedIPs; i++ {
+		ip := fmt.Sprintf("10.0.%d.%d", i/256, i%256)
+		limiter.attempts[ip] = &ipAttemptState{
+			count:       1,
+			firstFailed: now,
+			lastFailed:  now.Add(time.Duration(i) * time.Millisecond),
+		}
+	}
+	limiter.mu.Unlock()
+
+	// The map is full. A new failure must evict the oldest least-offending
+	// unlocked entry (10.0.0.0) rather than growing without bound.
+	limiter.RecordFailure("192.0.2.1")
+
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	if len(limiter.attempts) != maxTrackedIPs {
+		t.Fatalf("expected bounded map of %d entries, got %d", maxTrackedIPs, len(limiter.attempts))
+	}
+	if _, ok := limiter.attempts["10.0.0.0"]; ok {
+		t.Fatal("expected oldest least-offending unlocked entry to be evicted")
+	}
+	if _, ok := limiter.attempts["192.0.2.1"]; !ok {
+		t.Fatal("expected the new failure to be tracked")
+	}
+}
+
+func TestLoginRateLimiterFailsClosedWhenAllEntriesAreLocked(t *testing.T) {
+	limiter := NewLoginRateLimiter()
+	now := time.Now()
+
+	limiter.mu.Lock()
+	for i := 0; i < maxTrackedIPs; i++ {
+		ip := fmt.Sprintf("10.0.%d.%d", i/256, i%256)
+		limiter.attempts[ip] = &ipAttemptState{
+			count:       limiter.maxAttempts,
+			firstFailed: now,
+			lastFailed:  now,
+			lockedUntil: now.Add(time.Hour),
+		}
+	}
+	limiter.mu.Unlock()
+
+	locked, _, _ := limiter.RecordFailure("192.0.2.1")
+	if !locked {
+		t.Fatal("expected a saturated all-locked limiter to fail closed")
+	}
+
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	if len(limiter.attempts) != maxTrackedIPs {
+		t.Fatalf("expected the map to remain bounded at %d entries, got %d", maxTrackedIPs, len(limiter.attempts))
 	}
 }

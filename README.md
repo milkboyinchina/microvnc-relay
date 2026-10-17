@@ -117,7 +117,7 @@ server:
   targets_file: "targets.yaml" # Dedicated target list (auto-detected alongside config.yaml)
 
 security:
-  auth_enabled: true           # First run prompts you to create admin password
+  auth_enabled: true           # First run requires the one-time token from journal/docker logs
   session_timeout_minutes: 1440
 
 access_control:
@@ -125,6 +125,27 @@ access_control:
   allowed_subnets:
     - "100.64.0.0/10"          # NetBird overlay subnet only
     - "127.0.0.1/32"
+```
+
+### First-Run Setup (Token-Only)
+
+A fresh install has **no default credentials**. On first start the relay prints a one-time setup token:
+
+```bash
+sudo journalctl -u microvnc-relay -n 50 | grep -i "setup token"
+# Docker:
+docker logs <container> 2>&1 | grep -i "setup token"
+```
+
+Paste that token into the WebUI setup form along with the new administrator username and password. The token is held in memory only, is never served over HTTP, and is invalidated as soon as setup completes.
+
+Password reset is explicit:
+
+```bash
+sudo systemctl stop microvnc-relay
+sudo rm /etc/microvnc-relay/auth.json
+sudo systemctl start microvnc-relay
+# read the newly printed setup token and complete setup again
 ```
 
 ```yaml

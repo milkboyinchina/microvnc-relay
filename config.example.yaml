@@ -69,9 +69,12 @@ server:
 # ==============================================================================
 security:
   # Protect WebUI with session authentication (Recommended: true)
-  # On first launch with auth_enabled: true, the WebUI prompts you to create
-  # administrator credentials, which are hashed with bcrypt and saved to auth.json.
-  # (To reset password, simply delete auth.json and restart the relay).
+  # On first launch with auth_enabled: true, the relay prints a one-time setup
+  # token to stdout/journal. The WebUI setup form requires that token before it
+  # will create administrator credentials (bcrypt, written to auth.json).
+  # Read it with: journalctl -u microvnc-relay | docker logs <container>
+  # To reset: stop the service, delete auth.json, start the service, and use the
+  # newly printed token. There is no default username or password.
   auth_enabled: true
 
   # Session timeout in minutes

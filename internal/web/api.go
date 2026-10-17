@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -82,6 +83,11 @@ func (a *APIHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("/api/v1/ws/telemetry", wrap(a.handleTelemetryWS))
 }
 
+const (
+	maxAuthBodyBytes   = 64 << 10
+	maxDeviceBodyBytes = 1 << 20
+)
+
 func (a *APIHandler) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -95,6 +101,7 @@ func (a *APIHandler) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		"auth_enabled":   a.cfg.Security.AuthEnabled,
 		"authenticated":  authenticated,
 		"setup_required": a.auth.SetupRequired(),
+		"auth_broken":    a.auth.AuthBroken(),
 		"version":        a.version,
 	})
 }
@@ -105,26 +112,77 @@ func (a *APIHandler) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if a.auth.AuthBroken() {
+		writeError(w, http.StatusForbidden, "auth.json exists but is invalid; delete it and restart to reset credentials")
+		return
+	}
 	if !a.auth.SetupRequired() {
-		writeError(w, http.StatusBadRequest, "Administrator credentials have already been configured")
+		writeError(w, http.StatusForbidden, "Administrator credentials have already been configured")
+		return
+	}
+
+	clientIP := ExtractClientIP(r)
+	if locked, remaining, delay := a.limiter.Check(clientIP); locked {
+		retryAfter := int(remaining.Seconds()) + 1
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error":               "Too many failed setup attempts. Try again later.",
+			"retry_after_seconds": retryAfter,
+		})
+		return
+	} else if delay > 0 {
+		retryAfter := int(delay.Seconds()) + 1
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error":               "Too many failed setup attempts. Try again shortly.",
+			"retry_after_seconds": retryAfter,
+		})
 		return
 	}
 
 	var req struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
+		Username   string `json:"username"`
+		Password   string `json:"password"`
+		SetupToken string `json:"setup_token"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxAuthBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid JSON payload")
 		return
 	}
+	if req.SetupToken == "" {
+		req.SetupToken = strings.TrimSpace(r.Header.Get("X-Setup-Token"))
+	}
 
-	if err := a.auth.SetAdminCredentials(req.Username, req.Password); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if err := a.auth.SetAdminCredentials(req.Username, req.Password, req.SetupToken); err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidSetupToken):
+			a.limiter.RecordFailure(clientIP)
+			writeError(w, http.StatusForbidden, "Invalid or expired setup token")
+		case errors.Is(err, ErrAlreadyConfigured):
+			writeError(w, http.StatusForbidden, "Administrator credentials have already been configured")
+		case errors.Is(err, ErrBcryptBusy):
+			w.Header().Set("Retry-After", "2")
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"error":               "Credential hashing is busy. Retry shortly.",
+				"retry_after_seconds": 2,
+			})
+		case strings.Contains(err.Error(), "username"), strings.Contains(err.Error(), "password"):
+			writeError(w, http.StatusBadRequest, err.Error())
+		default:
+			slog.Error("failed to complete first-run setup", "err", err)
+			writeError(w, http.StatusInternalServerError, "Failed to persist administrator credentials")
+		}
 		return
 	}
 
-	token := a.auth.CreateSession(req.Username)
+	a.limiter.RecordSuccess(clientIP)
+	token, err := a.auth.CreateSession(req.Username)
+	if err != nil {
+		slog.Error("credentials saved but session creation failed", "err", err)
+		writeError(w, http.StatusInternalServerError, "Credentials saved, but session creation failed; please log in")
+		return
+	}
 	a.auth.SetSessionCookie(w, token)
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -138,12 +196,14 @@ func (a *APIHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	clientIP := ExtractClientIP(r)
 
-	// Check if this IP is currently locked out or subject to progressive delay
+	// Check if this IP is currently locked out or subject to progressive delay.
 	locked, remaining, delay := a.limiter.Check(clientIP)
 	if locked {
+		retryAfter := int(remaining.Seconds()) + 1
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 		writeJSON(w, http.StatusTooManyRequests, map[string]any{
 			"error":               "Too many failed login attempts. Account temporarily locked for security.",
-			"retry_after_seconds": int(remaining.Seconds()),
+			"retry_after_seconds": retryAfter,
 		})
 		return
 	}
@@ -165,17 +225,38 @@ func (a *APIHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxAuthBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid JSON payload")
 		return
 	}
 
-	if !a.auth.VerifyCredentials(req.Username, req.Password) {
+	ok, err := a.auth.VerifyCredentials(req.Username, req.Password)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrBcryptBusy):
+			w.Header().Set("Retry-After", "2")
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"error":               "Credential verification is busy. Retry shortly.",
+				"retry_after_seconds": 2,
+			})
+		case errors.Is(err, ErrAuthFileBroken):
+			writeError(w, http.StatusServiceUnavailable, "auth.json is invalid; delete it and restart to reset credentials")
+		default:
+			slog.Error("credential verification failed", "err", err)
+			writeError(w, http.StatusInternalServerError, "Authentication is temporarily unavailable")
+		}
+		return
+	}
+
+	if !ok {
 		lockedNow, _, lockoutDur := a.limiter.RecordFailure(clientIP)
 		if lockedNow {
+			retryAfter := int(lockoutDur.Seconds()) + 1
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 			writeJSON(w, http.StatusTooManyRequests, map[string]any{
 				"error":               "Too many failed login attempts. Locked out for 15 minutes.",
-				"retry_after_seconds": int(lockoutDur.Seconds()),
+				"retry_after_seconds": retryAfter,
 			})
 			return
 		}
@@ -184,7 +265,12 @@ func (a *APIHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.limiter.RecordSuccess(clientIP)
-	token := a.auth.CreateSession(req.Username)
+	token, err := a.auth.CreateSession(req.Username)
+	if err != nil {
+		slog.Error("failed to create session", "err", err)
+		writeError(w, http.StatusInternalServerError, "Session creation failed")
+		return
+	}
 	a.auth.SetSessionCookie(w, token)
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -219,6 +305,7 @@ func (a *APIHandler) handleDevices(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodPost:
 		var dev config.DeviceConfig
+		r.Body = http.MaxBytesReader(w, r.Body, maxDeviceBodyBytes)
 		if err := json.NewDecoder(r.Body).Decode(&dev); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid JSON payload")
 			return
@@ -301,6 +388,7 @@ func (a *APIHandler) handleDeviceByID(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPut:
 		var dev config.DeviceConfig
+		r.Body = http.MaxBytesReader(w, r.Body, maxDeviceBodyBytes)
 		if err := json.NewDecoder(r.Body).Decode(&dev); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid JSON payload")
 			return

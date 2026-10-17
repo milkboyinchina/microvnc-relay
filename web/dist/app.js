@@ -91,6 +91,17 @@
       const res = await fetch('/api/v1/auth/status');
       if (res.ok) {
         const data = await res.json();
+        if (data.auth_broken) {
+          if (elSetupModal) elSetupModal.style.display = 'none';
+          if (elLoginModal) elLoginModal.style.display = 'flex';
+          if (elBtnLogout) elBtnLogout.style.display = 'none';
+          if (elLoginError) {
+            elLoginError.textContent = 'auth.json exists but is invalid. Delete it and restart the relay to reset credentials.';
+            elLoginError.style.display = 'block';
+          }
+          return false;
+        }
+
         if (data.setup_required) {
           if (elSetupModal) elSetupModal.style.display = 'flex';
           if (elLoginModal) elLoginModal.style.display = 'none';
@@ -122,10 +133,15 @@
       e.preventDefault();
       if (elSetupError) elSetupError.style.display = 'none';
 
+      const setupToken = document.getElementById('setup-token').value.trim();
       const user = document.getElementById('setup-username').value.trim();
       const pass = document.getElementById('setup-password').value;
       const confirmPass = document.getElementById('setup-password-confirm').value;
 
+      if (!setupToken) {
+        showSetupError('The one-time setup token is required. Read it from journalctl or docker logs.');
+        return;
+      }
       if (!user) {
         showSetupError('Username is required');
         return;
@@ -143,7 +159,7 @@
         const res = await fetch('/api/v1/auth/setup', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: user, password: pass })
+          body: JSON.stringify({ username: user, password: pass, setup_token: setupToken })
         });
         if (res.ok) {
           if (elSetupModal) elSetupModal.style.display = 'none';

@@ -27,7 +27,10 @@ func setupTestWebServer(t *testing.T, authEnabled bool) (*Server, *config.Config
 	cfg.Features.WebUIEnabled = true
 	cfg.Security.AuthEnabled = authEnabled
 	cfg.Security.Username = "admin"
-	cfg.Security.PasswordHash = "secret123" // Test plaintext auto-upgrade
+	// Precomputed bcrypt hash for "secret123" at cost 4. Using a low cost keeps
+	// the HTTP integration suite fast; plaintext auto-upgrade is covered by
+	// TestAuthPlaintextConfigHashIsUpgraded.
+	cfg.Security.PasswordHash = "$2a$04$EbJ/8vBHPJSq.0Um0Ptyu.bo7EtTlnr0KnOtAE.NurZ0MzFbgnUsi"
 	cfg.Devices = []config.DeviceConfig{
 		{
 			ID:          "lab-rpi",
@@ -347,6 +350,7 @@ func TestWebSocketTelemetryUpgrade(t *testing.T) {
 }
 
 func TestFirstRunAuthSetupAndReset(t *testing.T) {
+	useFastBcrypt(t)
 	tmpDir := t.TempDir()
 	configPath := tmpDir + "/config.yaml"
 	authPath := tmpDir + "/auth.json"
@@ -399,10 +403,33 @@ func TestFirstRunAuthSetupAndReset(t *testing.T) {
 		t.Fatalf("expected 403 Forbidden before setup, got %d", respDev.StatusCode)
 	}
 
-	// 3. POST /api/v1/auth/setup -> creates auth.json and logs in
-	setupPayload, _ := json.Marshal(map[string]string{
+	// The one-time setup token is printed to stdout/journal and kept in memory.
+	server.auth.mu.RLock()
+	setupToken := server.auth.setupToken
+	server.auth.mu.RUnlock()
+	if setupToken == "" {
+		t.Fatal("expected a non-empty first-run setup token")
+	}
+
+	// 3. POST without the token -> 403 (token-only setup, no localhost bypass)
+	noTokenPayload, _ := json.Marshal(map[string]string{
 		"username": "admin",
 		"password": "mypassword123",
+	})
+	respNoToken, err := http.Post(addr+"/api/v1/auth/setup", "application/json", bytes.NewReader(noTokenPayload))
+	if err != nil {
+		t.Fatalf("POST /auth/setup without token: %v", err)
+	}
+	_ = respNoToken.Body.Close()
+	if respNoToken.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 without setup token, got %d", respNoToken.StatusCode)
+	}
+
+	// 4. POST with the correct token -> creates auth.json and logs in
+	setupPayload, _ := json.Marshal(map[string]string{
+		"username":    "admin",
+		"password":    "mypassword123",
+		"setup_token": setupToken,
 	})
 	respSetup, err := http.Post(addr+"/api/v1/auth/setup", "application/json", bytes.NewReader(setupPayload))
 	if err != nil {
@@ -416,6 +443,16 @@ func TestFirstRunAuthSetupAndReset(t *testing.T) {
 	// Verify auth.json was created on disk
 	if _, err := os.Stat(authPath); err != nil {
 		t.Fatalf("expected auth.json to exist at %s: %v", authPath, err)
+	}
+
+	// 5. A second setup attempt must be refused even with the old token.
+	respAgain, err := http.Post(addr+"/api/v1/auth/setup", "application/json", bytes.NewReader(setupPayload))
+	if err != nil {
+		t.Fatalf("POST /auth/setup again: %v", err)
+	}
+	_ = respAgain.Body.Close()
+	if respAgain.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 on second setup, got %d", respAgain.StatusCode)
 	}
 
 	// Verify session cookie was returned
