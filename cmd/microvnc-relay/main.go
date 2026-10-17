@@ -184,6 +184,7 @@ func main() {
 				slog.Warn("[PORT COLLISION] One or more Mode 1 listeners failed to bind during reload", "error", err)
 			}
 			pinger.SetInterval(cfg.Telemetry.TargetPingIntervalSec)
+			pinger.TriggerSweep()
 			slog.Info("Configuration hot-reloaded successfully",
 				"devices", len(cfg.GetDevices()),
 				"access_control_enabled", cfg.AccessControl.Enabled,

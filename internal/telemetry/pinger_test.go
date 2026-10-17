@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -160,6 +161,111 @@ func TestPingerOnlineOfflineAndPruning(t *testing.T) {
 	if _, stillExists := pinger.GetStatus("dev-offline"); stillExists {
 		t.Error("expected deleted device dev-offline to be pruned from Pinger statuses")
 	}
+}
+
+func TestPingerOnDemandBusy(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Devices = []config.DeviceConfig{{
+		ID: "dev", Host: "127.0.0.1", Port: 5900, Enabled: true,
+	}}
+	p := NewPinger(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+
+	for i := 0; i < maxConcurrentProbes; i++ {
+		p.probeSem <- struct{}{}
+	}
+	defer func() {
+		for i := 0; i < maxConcurrentProbes; i++ {
+			<-p.probeSem
+		}
+	}()
+
+	if _, err := p.ProbeDeviceNow(cfg.Devices[0]); !errors.Is(err, ErrProbeBusy) {
+		t.Fatalf("expected ErrProbeBusy, got %v", err)
+	}
+}
+
+func TestPingerSchedulerRespectsSharedSemaphore(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+
+	cfg := config.DefaultConfig()
+	cfg.Telemetry.TargetPingIntervalSec = 10
+	cfg.Devices = []config.DeviceConfig{{
+		ID:      "dev",
+		Host:    "127.0.0.1",
+		Port:    ln.Addr().(*net.TCPAddr).Port,
+		Enabled: true,
+	}}
+
+	p := NewPinger(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+	fixedNow := time.Now()
+	p.nowFn = func() time.Time { return fixedNow }
+	p.jitterFn = func(d time.Duration) time.Duration { return d }
+
+	previousDue := fixedNow.Add(-time.Second)
+	p.mu.Lock()
+	p.nextProbe["dev"] = previousDue
+	p.mu.Unlock()
+
+	// Saturate the shared semaphore: the due host must not be scheduled.
+	for i := 0; i < maxConcurrentProbes; i++ {
+		p.probeSem <- struct{}{}
+	}
+	p.schedulerTick()
+
+	p.mu.RLock()
+	gotDue := p.nextProbe["dev"]
+	p.mu.RUnlock()
+	if !gotDue.Equal(previousDue) {
+		t.Fatalf("due host was scheduled despite a full semaphore: %v", gotDue)
+	}
+
+	// Free one slot: the next tick schedules it and advances the due time.
+	<-p.probeSem
+	p.schedulerTick()
+	p.probeWG.Wait()
+
+	p.mu.RLock()
+	gotDue = p.nextProbe["dev"]
+	p.mu.RUnlock()
+	wantDue := fixedNow.Add(10 * time.Second)
+	if !gotDue.Equal(wantDue) {
+		t.Fatalf("next probe due = %v, want %v", gotDue, wantDue)
+	}
+
+	for i := 0; i < maxConcurrentProbes-1; i++ {
+		<-p.probeSem
+	}
+}
+
+func TestPingerJitterBounds(t *testing.T) {
+	const interval = 10 * time.Second
+	for i := 0; i < 100; i++ {
+		got := defaultJitter(interval)
+		if got < 8*time.Second || got > 12*time.Second {
+			t.Fatalf("jitter out of +/-20%% bounds: %v", got)
+		}
+	}
+}
+
+func TestPingerStopIsIdempotent(t *testing.T) {
+	cfg := config.DefaultConfig()
+	p := NewPinger(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+	p.Start()
+	p.Stop()
+	p.Stop()
 }
 
 func TestPingerFeatureFlagDisabled(t *testing.T) {

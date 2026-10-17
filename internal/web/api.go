@@ -329,6 +329,9 @@ func (a *APIHandler) handleDevices(w http.ResponseWriter, r *http.Request) {
 		if a.mode1Reloader != nil {
 			reloadErr = a.mode1Reloader(a.cfg.GetDevices())
 		}
+		if a.pinger != nil {
+			a.pinger.TriggerSweep()
+		}
 
 		bindErrs := a.getBindErrors()
 		devBindErr := bindErrs[dev.ID]
@@ -372,7 +375,22 @@ func (a *APIHandler) handleDeviceByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "Latency pinger disabled")
 			return
 		}
-		status := a.pinger.ProbeDevice(dev)
+		status, err := a.pinger.ProbeDeviceNow(dev)
+		if err != nil {
+			switch {
+			case errors.Is(err, telemetry.ErrProbeBusy):
+				w.Header().Set("Retry-After", "1")
+				writeJSON(w, http.StatusTooManyRequests, map[string]any{
+					"error":               "Probe scheduler is busy. Retry shortly.",
+					"retry_after_seconds": 1,
+				})
+			case errors.Is(err, telemetry.ErrProbeStopped):
+				writeError(w, http.StatusServiceUnavailable, "Probe scheduler is shutting down")
+			default:
+				writeError(w, http.StatusInternalServerError, "Probe failed")
+			}
+			return
+		}
 		writeJSON(w, http.StatusOK, status)
 		return
 	}
@@ -412,6 +430,9 @@ func (a *APIHandler) handleDeviceByID(w http.ResponseWriter, r *http.Request) {
 		if a.mode1Reloader != nil {
 			reloadErr = a.mode1Reloader(a.cfg.GetDevices())
 		}
+		if a.pinger != nil {
+			a.pinger.TriggerSweep()
+		}
 
 		bindErrs := a.getBindErrors()
 		devBindErr := bindErrs[dev.ID]
@@ -443,6 +464,9 @@ func (a *APIHandler) handleDeviceByID(w http.ResponseWriter, r *http.Request) {
 
 		if a.mode1Reloader != nil {
 			_ = a.mode1Reloader(a.cfg.GetDevices())
+		}
+		if a.pinger != nil {
+			a.pinger.TriggerSweep()
 		}
 
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
