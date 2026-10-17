@@ -12,8 +12,13 @@ Restart=always
 RestartSec=5s
 
 # Memory Safety & Flash Protection Boundaries (< 35MB Active RSS Budget)
-Environment="GOMEMLIMIT=48MiB" "GOGC=50"
-MemoryMax=128M
+# GOMEMLIMIT is a soft Go-heap ceiling: worst-case RSS ~= non-heap base
+# (~8-10MB binary text + stacks) + limit, so 24MiB keeps RSS under the
+# 35MB contract (48MiB allowed ~13MB of overshoot). MemoryHigh throttles
+# before the MemoryMax hard backstop.
+Environment="GOMEMLIMIT=24MiB" "GOGC=50"
+MemoryHigh=32M
+MemoryMax=48M
 LimitNOFILE=65536
 
 # Sandboxing & System Hardening

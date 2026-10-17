@@ -23,6 +23,8 @@ const (
 	// defaultMode2HandshakeTimeoutSec is the fallback ID:xxxx handshake deadline
 	// when connection_limits.mode2_handshake_timeout_sec is unset (<= 0).
 	defaultMode2HandshakeTimeoutSec = 5
+	// maxPendingServers caps the in-memory pool of waiting reverse VNC servers to prevent FD exhaustion.
+	maxPendingServers = 64
 )
 
 type pendingServer struct {
@@ -204,6 +206,24 @@ func (m *Mode2Manager) handleReverseServer(serverConn net.Conn) {
 		_ = serverConn.Close()
 		return
 	}
+	// Prune any dead waiting sockets if approaching capacity limit
+	if len(m.pending) >= maxPendingServers {
+		for id, ps := range m.pending {
+			if !isSocketAlive(ps.conn) {
+				_ = ps.conn.Close()
+				delete(m.pending, id)
+			}
+		}
+	}
+	if len(m.pending) >= maxPendingServers {
+		m.mu.Unlock()
+		m.log.Warn("rejected Mode 2 reverse server: waiting pool capacity reached",
+			"max_capacity", maxPendingServers,
+			"server_addr", serverConn.RemoteAddr().String(),
+		)
+		_ = serverConn.Close()
+		return
+	}
 	if prev, exists := m.pending[mode2ID]; exists {
 		_ = prev.conn.Close()
 		m.log.Info("replaced previous waiting Mode 2 reverse server", "mode2_id", mode2ID)
@@ -269,6 +289,16 @@ func (m *Mode2Manager) handleViewer(viewerConn net.Conn) {
 	ps, ok := m.pending[mode2ID]
 	if ok {
 		delete(m.pending, mode2ID)
+		if !isSocketAlive(ps.conn) {
+			_ = ps.conn.Close()
+			m.mu.Unlock()
+			m.log.Warn("Mode 2 waiting reverse server disconnected before viewer arrived",
+				"mode2_id", mode2ID,
+				"viewer_ip", viewerConn.RemoteAddr().String(),
+			)
+			_ = viewerConn.Close()
+			return
+		}
 	}
 	m.mu.Unlock()
 
@@ -347,8 +377,17 @@ func (m *Mode2Manager) findDeviceByMode2ID(mode2ID int) (config.DeviceConfig, bo
 func (m *Mode2Manager) HasPendingServer(mode2ID int) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	_, ok := m.pending[mode2ID]
-	return ok
+	ps, ok := m.pending[mode2ID]
+	if !ok {
+		return false
+	}
+	if !isSocketAlive(ps.conn) {
+		_ = ps.conn.Close()
+		delete(m.pending, mode2ID)
+		m.log.Info("pruned disconnected Mode 2 reverse server from waiting pool", "mode2_id", mode2ID)
+		return false
+	}
+	return true
 }
 
 // ReverseAddr returns the bound address of the Mode 2 reverse server listener, or empty if not running.

@@ -389,3 +389,54 @@ func TestForwardStreamQoSAndIdleTimeout(t *testing.T) {
 		t.Fatal("expected ForwardStream to close after 1s IdleTimeoutSec")
 	}
 }
+
+func TestMode1PortCollisionTracking(t *testing.T) {
+	// Occupy a port externally to simulate EADDRINUSE
+	externalLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to bind external port: %v", err)
+	}
+	defer externalLn.Close()
+	occupiedPort := externalLn.Addr().(*net.TCPAddr).Port
+
+	freePort := getFreePort(t)
+
+	cfg := config.DefaultConfig()
+	cfg.Server.VNCBind = "127.0.0.1"
+	cfg.Devices = []config.DeviceConfig{
+		{
+			ID:          "collision-dev",
+			Name:        "Collision Target",
+			Host:        "127.0.0.1",
+			Port:        5900,
+			VirtualPort: occupiedPort,
+			Enabled:     true,
+		},
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	m1 := NewMode1Manager(cfg, nil, log)
+	defer m1.Stop()
+
+	// Start should return an error and record the bind error for "collision-dev"
+	if err := m1.Start(); err == nil {
+		t.Fatalf("expected Start to return bind error for occupied port %d", occupiedPort)
+	}
+
+	bindErrs := m1.GetBindErrors()
+	if bindErrs["collision-dev"] == "" {
+		t.Fatalf("expected bind error recorded for 'collision-dev', got: %+v", bindErrs)
+	}
+
+	// Reconfigure to a free port and reload -> bind error must be cleared
+	cfg.Devices[0].VirtualPort = freePort
+	if err := m1.Reload(cfg.Devices); err != nil {
+		t.Fatalf("Reload on free port failed: %v", err)
+	}
+
+	bindErrsAfter := m1.GetBindErrors()
+	if len(bindErrsAfter) != 0 {
+		t.Fatalf("expected bind errors cleared after resolving port collision, got: %+v", bindErrsAfter)
+	}
+}
+

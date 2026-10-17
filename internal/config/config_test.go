@@ -108,6 +108,30 @@ func TestValidationErrors(t *testing.T) {
 			t.Errorf("Expected error for invalid CIDR subnet, got nil")
 		}
 	})
+
+	t.Run("Virtual Port Conflicts With WebBind", func(t *testing.T) {
+		cfg := DefaultConfig() // WebBind defaults to 0.0.0.0:8080
+		cfg.Devices = []DeviceConfig{
+			{ID: "dev1", Host: "10.0.0.1", Port: 5900, VirtualPort: 8080},
+		}
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("Expected error for virtual_port colliding with web_bind :8080, got nil")
+		}
+	})
+
+	t.Run("Virtual Port Conflicts With Mode2 Ports", func(t *testing.T) {
+		cfg := DefaultConfig() // Mode2ReversePort=5500, Mode2ViewerPort=5901
+		cfg.Devices = []DeviceConfig{
+			{ID: "dev1", Host: "10.0.0.1", Port: 5900, VirtualPort: 5500},
+		}
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("Expected error for virtual_port colliding with mode2_reverse_port :5500, got nil")
+		}
+		cfg.Devices[0].VirtualPort = 5901
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("Expected error for virtual_port colliding with mode2_viewer_port :5901, got nil")
+		}
+	})
 }
 
 func TestAtomicSaveAndReload(t *testing.T) {
@@ -150,6 +174,15 @@ func TestDeviceCRUD(t *testing.T) {
 	dev := DeviceConfig{ID: "dev-a", Host: "192.168.1.10", Port: 5900, VirtualPort: 5915, Enabled: true}
 	if err := cfg.AddOrUpdateDevice(dev); err != nil {
 		t.Fatalf("Add device failed: %v", err)
+	}
+
+	// Attempt to add a conflicting device on the same virtual_port -> must fail and roll back
+	conflictDev := DeviceConfig{ID: "dev-b", Host: "192.168.1.11", Port: 5900, VirtualPort: 5915, Enabled: true}
+	if err := cfg.AddOrUpdateDevice(conflictDev); err == nil {
+		t.Fatalf("Expected port collision error when adding dev-b on port 5915")
+	}
+	if len(cfg.GetDevices()) != 1 {
+		t.Fatalf("Expected rollback to preserve 1 device, got %d", len(cfg.GetDevices()))
 	}
 
 	if d, ok := cfg.FindDeviceByVirtualPort(5915); !ok || d.ID != "dev-a" {

@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -37,6 +38,9 @@ type SecurityConfig struct {
 	Username              string `yaml:"username"`
 	PasswordHash          string `yaml:"password_hash"`
 	SessionTimeoutMinutes int    `yaml:"session_timeout_minutes"`
+	// SecureCookies sets the Secure attribute on session cookies. Enable
+	// when the WebUI is served over HTTPS (reverse proxy or overlay TLS).
+	SecureCookies bool `yaml:"secure_cookies"`
 }
 
 // AccessControlConfig manages CIDR-based client IP filtering.
@@ -86,6 +90,8 @@ type DeviceConfig struct {
 // Config is the root application configuration structure.
 type Config struct {
 	mu               sync.RWMutex
+	targetsPath      string
+	TargetsFile      string                 `yaml:"targets_file"`
 	Features         FeaturesConfig         `yaml:"features"`
 	Server           ServerConfig           `yaml:"server"`
 	Security         SecurityConfig         `yaml:"security"`
@@ -115,9 +121,10 @@ func DefaultConfig() *Config {
 			Mode2ViewerPort:  5901,
 		},
 		Security: SecurityConfig{
+			// No default credentials: a fresh install must complete first-run
+			// setup (auth.json) before any session can be issued. Preloading a
+			// known default hash bypasses the first-run setup gate (audit F8).
 			AuthEnabled:           true,
-			Username:              "admin",
-			PasswordHash:          "$2a$12$e8N4O1.UqMh0z7e5k8aE1.9JgU6P8f2K4r3B1t0y9u8i7o6p5q4w3", // "admin"
 			SessionTimeoutMinutes: 1440,
 		},
 		AccessControl: AccessControlConfig{
@@ -165,6 +172,20 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config yaml: %w", err)
 	}
 
+	// Resolve standalone targets file path (targets.yaml)
+	cfg.targetsPath = ResolveTargetsPath(path, cfg.TargetsFile)
+
+	// If standalone targets.yaml exists on disk, load targets from it
+	if _, err := os.Stat(cfg.targetsPath); err == nil {
+		targets, err := LoadTargetsFile(cfg.targetsPath)
+		if err != nil {
+			return nil, fmt.Errorf("load targets file %s: %w", cfg.targetsPath, err)
+		}
+		cfg.Devices = targets
+	} else if len(cfg.Devices) > 0 {
+		// Backwards compatibility: loaded inline from config.yaml devices key
+	}
+
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}
@@ -176,10 +197,21 @@ func Load(path string) (*Config, error) {
 func (c *Config) Validate() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.validateLocked()
+}
 
+func (c *Config) validateLocked() error {
 	// Server validation
-	if c.Features.WebUIEnabled && c.Server.WebBind == "" {
-		return errors.New("server.web_bind must be specified when webui_enabled is true")
+	var webPort int
+	if c.Features.WebUIEnabled {
+		if c.Server.WebBind == "" {
+			return errors.New("server.web_bind must be specified when webui_enabled is true")
+		}
+		if _, portStr, err := net.SplitHostPort(c.Server.WebBind); err == nil {
+			if p, err := strconv.Atoi(portStr); err == nil && p > 0 {
+				webPort = p
+			}
+		}
 	}
 
 	if c.Features.Mode2Enabled {
@@ -191,6 +223,12 @@ func (c *Config) Validate() error {
 		}
 		if c.Server.Mode2ReversePort == c.Server.Mode2ViewerPort {
 			return errors.New("mode2_reverse_port and mode2_viewer_port cannot be identical")
+		}
+		if webPort > 0 && webPort == c.Server.Mode2ReversePort {
+			return fmt.Errorf("port collision: server.web_bind port %d conflicts with mode2_reverse_port %d", webPort, c.Server.Mode2ReversePort)
+		}
+		if webPort > 0 && webPort == c.Server.Mode2ViewerPort {
+			return fmt.Errorf("port collision: server.web_bind port %d conflicts with mode2_viewer_port %d", webPort, c.Server.Mode2ViewerPort)
 		}
 	}
 
@@ -260,19 +298,31 @@ func (c *Config) Validate() error {
 		}
 		seenIDs[dev.ID] = true
 
-		if strings.TrimSpace(dev.Host) == "" {
-			return fmt.Errorf("device %q has empty host", dev.ID)
-		}
-		if dev.Port <= 0 || dev.Port > 65535 {
-			return fmt.Errorf("device %q has invalid target port: %d", dev.ID, dev.Port)
+		isMode2ReverseOnly := dev.Mode2ID > 0 && dev.VirtualPort == 0
+		if !isMode2ReverseOnly {
+			if strings.TrimSpace(dev.Host) == "" {
+				return fmt.Errorf("device %q has empty host", dev.ID)
+			}
+			if dev.Port <= 0 || dev.Port > 65535 {
+				return fmt.Errorf("device %q has invalid target port: %d", dev.ID, dev.Port)
+			}
 		}
 
 		if dev.VirtualPort > 0 {
 			if dev.VirtualPort > 65535 {
 				return fmt.Errorf("device %q has invalid virtual_port: %d", dev.ID, dev.VirtualPort)
 			}
+			if webPort > 0 && dev.VirtualPort == webPort {
+				return fmt.Errorf("port collision: virtual_port %d for device %q conflicts with WebUI server port (%s)", dev.VirtualPort, dev.ID, c.Server.WebBind)
+			}
+			if c.Features.Mode2Enabled && dev.VirtualPort == c.Server.Mode2ReversePort {
+				return fmt.Errorf("port collision: virtual_port %d for device %q conflicts with Mode 2 reverse port (%d)", dev.VirtualPort, dev.ID, c.Server.Mode2ReversePort)
+			}
+			if c.Features.Mode2Enabled && dev.VirtualPort == c.Server.Mode2ViewerPort {
+				return fmt.Errorf("port collision: virtual_port %d for device %q conflicts with Mode 2 viewer port (%d)", dev.VirtualPort, dev.ID, c.Server.Mode2ViewerPort)
+			}
 			if existingID, ok := seenVirtualPorts[dev.VirtualPort]; ok {
-				return fmt.Errorf("virtual_port %d conflict between device %q and %q", dev.VirtualPort, existingID, dev.ID)
+				return fmt.Errorf("port collision: virtual_port %d conflict between device %q and %q", dev.VirtualPort, existingID, dev.ID)
 			}
 			seenVirtualPorts[dev.VirtualPort] = dev.ID
 		}
@@ -394,8 +444,14 @@ func (c *Config) FindDeviceByMode2ID(id int) (DeviceConfig, bool) {
 }
 
 // AddOrUpdateDevice updates an existing device or appends a new device, re-validating the configuration.
+// If validation fails (e.g. due to port collision), the change is rolled back cleanly.
 func (c *Config) AddOrUpdateDevice(dev DeviceConfig) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	backup := make([]DeviceConfig, len(c.Devices))
+	copy(backup, c.Devices)
+
 	found := false
 	for i, d := range c.Devices {
 		if d.ID == dev.ID {
@@ -407,9 +463,13 @@ func (c *Config) AddOrUpdateDevice(dev DeviceConfig) error {
 	if !found {
 		c.Devices = append(c.Devices, dev)
 	}
-	c.mu.Unlock()
 
-	return c.Validate()
+	if err := c.validateLocked(); err != nil {
+		c.Devices = backup
+		return err
+	}
+
+	return nil
 }
 
 // DeleteDevice removes a device by ID. Returns true if removed, false if not found.
@@ -435,3 +495,72 @@ func (c *Config) GetDevices() []DeviceConfig {
 	copy(result, c.Devices)
 	return result
 }
+
+// SetDevices replaces the in-memory device list after validating for conflicts.
+func (c *Config) SetDevices(devs []DeviceConfig) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	backup := c.Devices
+	copied := make([]DeviceConfig, len(devs))
+	copy(copied, devs)
+	c.Devices = copied
+
+	if err := c.validateLocked(); err != nil {
+		c.Devices = backup
+		return err
+	}
+	return nil
+}
+
+// TargetsPath returns the path to the active targets file.
+func (c *Config) TargetsPath() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.targetsPath
+}
+
+// ReloadTargets re-reads the targets file from disk, validates it, and updates c.Devices.
+func (c *Config) ReloadTargets() ([]DeviceConfig, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.targetsPath == "" {
+		return c.Devices, nil
+	}
+
+	if _, err := os.Stat(c.targetsPath); err != nil {
+		return c.Devices, nil
+	}
+
+	targets, err := LoadTargetsFile(c.targetsPath)
+	if err != nil {
+		return nil, err
+	}
+
+	backup := c.Devices
+	c.Devices = targets
+	if err := c.validateLocked(); err != nil {
+		c.Devices = backup
+		return nil, err
+	}
+
+	result := make([]DeviceConfig, len(c.Devices))
+	copy(result, c.Devices)
+	return result, nil
+}
+
+// SaveTargets atomically writes the registered devices strictly to targets.yaml.
+func (c *Config) SaveTargets() error {
+	c.mu.RLock()
+	path := c.targetsPath
+	devs := make([]DeviceConfig, len(c.Devices))
+	copy(devs, c.Devices)
+	c.mu.RUnlock()
+
+	if path == "" {
+		path = "./targets.yaml"
+	}
+	return SaveTargetsFile(path, devs)
+}
+

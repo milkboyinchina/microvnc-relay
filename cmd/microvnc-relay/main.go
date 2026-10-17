@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,6 +27,7 @@ func main() {
 		configPath  string
 		showVersion bool
 		checkConfig bool
+		doReload    bool
 	)
 
 	flag.StringVar(&configPath, "config", "", "Path to YAML configuration file")
@@ -32,10 +35,17 @@ func main() {
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 	flag.BoolVar(&showVersion, "v", false, "Print version and exit (shorthand)")
 	flag.BoolVar(&checkConfig, "check-config", false, "Validate configuration file and exit (0 = valid, 1 = invalid)")
+	flag.BoolVar(&doReload, "reload", false, "Send reload signal (SIGHUP) to running daemon and exit")
+	flag.BoolVar(&doReload, "r", false, "Send reload signal (SIGHUP) to running daemon (shorthand)")
 	flag.Parse()
 
 	if showVersion {
 		fmt.Printf("μVNC Relay (microvnc-relay) version %s (dev_build=%v)\n", Version, IsDevBuild)
+		os.Exit(0)
+	}
+
+	if doReload {
+		handleCLIReload()
 		os.Exit(0)
 	}
 
@@ -64,6 +74,12 @@ func main() {
 	defer appLogger.Close()
 	appLogger.SetAsDefault()
 
+	pidPath := writePIDFile()
+	if pidPath != "" {
+		defer os.Remove(pidPath)
+		slog.Debug("Registered process PID file", "path", pidPath, "pid", os.Getpid())
+	}
+
 	slog.Info("Loaded configuration", "path", resolvedConfig)
 	logConfigurationSummary(cfg)
 
@@ -88,13 +104,13 @@ func main() {
 	// Start Mode 1 Port-Mapped Proxy Engine
 	mode1Mgr := proxy.NewMode1Manager(cfg, meter, slog.Default())
 	if err := mode1Mgr.Start(); err != nil {
-		slog.Warn("One or more Mode 1 listeners failed to bind at startup", "error", err)
+		slog.Warn("[PORT COLLISION] One or more Mode 1 listeners failed to bind at startup", "error", err)
 	}
 
 	// Start Mode 2 UltraVNC ID Reverse Matchmaker
 	mode2Mgr := proxy.NewMode2Manager(cfg, meter, slog.Default())
 	if err := mode2Mgr.Start(); err != nil {
-		slog.Error("Failed to start Mode 2 repeater listeners", "error", err)
+		slog.Error("[PORT COLLISION] Failed to start Mode 2 repeater listeners", "error", err)
 		mode1Mgr.Stop()
 		close(stopMeter)
 		os.Exit(1)
@@ -127,8 +143,10 @@ func main() {
 		close(stopMeter)
 		os.Exit(1)
 	}
+	webServer.SetBindErrorsGetter(mode1Mgr.GetBindErrors)
+
 	if err := webServer.Start(); err != nil {
-		slog.Error("Failed to start WebUI server listener", "error", err)
+		slog.Error("[PORT COLLISION] Failed to start WebUI server listener", "error", err)
 		pinger.Stop()
 		mode2Mgr.Stop()
 		mode1Mgr.Stop()
@@ -145,18 +163,19 @@ func main() {
 	for {
 		sig := <-sigChan
 		if sig == syscall.SIGHUP {
-			slog.Info("Received SIGHUP, reloading configuration", "path", resolvedConfig)
+			slog.Info("Received SIGHUP, reloading configuration", "path", resolvedConfig, "targets_path", cfg.TargetsPath())
 			if reloaded, err := config.Load(resolvedConfig); err != nil {
 				slog.Error("Failed to reload configuration on SIGHUP", "error", err)
 			} else {
-				// Partial hot-reload: only Mode 1 device listeners are reconciled.
-				// All other keys (web_bind, vnc_bind, mode2 ports, features.*,
-				// connection_limits, logging, telemetry, security, access_control)
-				// require a full process restart (systemctl restart).
-				_ = mode1Mgr.Reload(reloaded.GetDevices())
+				// Partial hot-reload: reconcile Mode 1 device listeners and update in-memory device list.
+				_ = cfg.SetDevices(reloaded.GetDevices())
+				if err := mode1Mgr.Reload(cfg.GetDevices()); err != nil {
+					slog.Warn("[PORT COLLISION] One or more Mode 1 listeners failed to bind during reload", "error", err)
+				}
 				if cfg.Features.LatencyProbesEnabled {
 					go pinger.ProbeAll()
 				}
+				slog.Info("Targets hot-reloaded successfully", "count", len(cfg.GetDevices()))
 			}
 			continue
 		}
@@ -238,4 +257,59 @@ func logConfigurationSummary(cfg *config.Config) {
 		"tcp_keepalive_sec", cfg.ConnectionLimits.TCPKeepAliveSec,
 		"dial_timeout_sec", cfg.ConnectionLimits.DialTimeoutSec,
 	)
+}
+
+func handleCLIReload() {
+	pid, path, err := findRunningPID()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: μVNC Relay daemon is not running (%v)\n", err)
+		os.Exit(1)
+	}
+
+	if !isProcessAlive(pid) {
+		fmt.Fprintf(os.Stderr, "Error: μVNC Relay PID %d from %s is not active\n", pid, path)
+		os.Exit(1)
+	}
+
+	if err := sendReloadSignal(pid); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to send reload signal to PID %d: %v\n", pid, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("✓ Reload signal (SIGHUP) sent to μVNC Relay (PID %d). Targets reloaded successfully.\n", pid)
+}
+
+func findRunningPID() (int, string, error) {
+	candidates := []string{
+		"/run/microvnc-relay.pid",
+		"/var/run/microvnc-relay.pid",
+		"/tmp/microvnc-relay.pid",
+	}
+
+	for _, p := range candidates {
+		data, err := os.ReadFile(p)
+		if err == nil {
+			var pid int
+			if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &pid); err == nil && pid > 0 {
+				return pid, p, nil
+			}
+		}
+	}
+	return 0, "", errors.New("PID file not found")
+}
+
+func writePIDFile() string {
+	candidates := []string{
+		"/run/microvnc-relay.pid",
+		"/var/run/microvnc-relay.pid",
+		"/tmp/microvnc-relay.pid",
+	}
+
+	pidStr := fmt.Sprintf("%d\n", os.Getpid())
+	for _, p := range candidates {
+		if err := os.WriteFile(p, []byte(pidStr), 0644); err == nil {
+			return p
+		}
+	}
+	return ""
 }

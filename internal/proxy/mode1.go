@@ -19,13 +19,14 @@ type mode1Listener struct {
 
 // Mode1Manager manages dedicated virtual port listeners for Mode 1 direct port-mapped devices.
 type Mode1Manager struct {
-	cfg       *config.Config
-	meter     *TrafficMeter
-	log       *slog.Logger
-	mu        sync.Mutex
-	listeners map[string]*mode1Listener
-	wg        sync.WaitGroup
-	stopped   bool
+	cfg        *config.Config
+	meter      *TrafficMeter
+	log        *slog.Logger
+	mu         sync.Mutex
+	listeners  map[string]*mode1Listener
+	bindErrors map[string]string
+	wg         sync.WaitGroup
+	stopped    bool
 }
 
 // NewMode1Manager creates a new Mode 1 Port-Mapped Proxy manager.
@@ -34,10 +35,11 @@ func NewMode1Manager(cfg *config.Config, meter *TrafficMeter, log *slog.Logger) 
 		log = slog.Default()
 	}
 	return &Mode1Manager{
-		cfg:       cfg,
-		meter:     meter,
-		log:       log,
-		listeners: make(map[string]*mode1Listener),
+		cfg:        cfg,
+		meter:      meter,
+		log:        log,
+		listeners:  make(map[string]*mode1Listener),
+		bindErrors: make(map[string]string),
 	}
 }
 
@@ -67,6 +69,13 @@ func (m *Mode1Manager) Reload(devices []config.DeviceConfig) error {
 		}
 	}
 
+	// Prune stale bind errors for removed or disabled devices
+	for id := range m.bindErrors {
+		if _, exists := desired[id]; !exists {
+			delete(m.bindErrors, id)
+		}
+	}
+
 	// Stop listeners that were removed or had their port/target changed
 	for id, active := range m.listeners {
 		want, exists := desired[id]
@@ -87,13 +96,21 @@ func (m *Mode1Manager) Reload(devices []config.DeviceConfig) error {
 	var firstErr error
 	for id, dev := range desired {
 		if _, alreadyRunning := m.listeners[id]; alreadyRunning {
+			delete(m.bindErrors, id)
 			continue
 		}
 		if err := m.startDeviceListenerLocked(dev); err != nil {
-			m.log.Error("failed to start Mode 1 listener", "device_id", id, "virtual_port", dev.VirtualPort, "err", err)
+			m.bindErrors[id] = fmt.Sprintf("Port :%d already in use (%v)", dev.VirtualPort, err)
+			m.log.Error("[PORT COLLISION] failed to bind Mode 1 virtual port",
+				"device_id", id,
+				"virtual_port", dev.VirtualPort,
+				"err", err,
+			)
 			if firstErr == nil {
 				firstErr = err
 			}
+		} else {
+			delete(m.bindErrors, id)
 		}
 	}
 
@@ -246,6 +263,17 @@ func (m *Mode1Manager) ListenerAddr(deviceID string) string {
 	return ""
 }
 
+// GetBindErrors returns a thread-safe snapshot of per-device port collision/bind errors.
+func (m *Mode1Manager) GetBindErrors() map[string]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]string, len(m.bindErrors))
+	for k, v := range m.bindErrors {
+		out[k] = v
+	}
+	return out
+}
+
 // Stop closes all active Mode 1 listeners and waits for active handlers to finish.
 func (m *Mode1Manager) Stop() {
 	m.mu.Lock()
@@ -259,6 +287,7 @@ func (m *Mode1Manager) Stop() {
 		_ = m1.listener.Close()
 		delete(m.listeners, id)
 	}
+	m.bindErrors = make(map[string]string)
 	m.mu.Unlock()
 
 	m.wg.Wait()

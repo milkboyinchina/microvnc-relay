@@ -303,6 +303,7 @@ func (a *AuthManager) SetSessionCookie(w http.ResponseWriter, token string) {
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   a.cfg.Security.SecureCookies,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   timeoutMin * 60,
 	})
@@ -315,6 +316,7 @@ func (a *AuthManager) ClearSessionCookie(w http.ResponseWriter) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   a.cfg.Security.SecureCookies,
 		MaxAge:   -1,
 	})
 }

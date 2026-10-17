@@ -91,6 +91,13 @@ func NewServer(
 	}, nil
 }
 
+// SetBindErrorsGetter attaches a callback to inspect Mode 1 virtual port bind collisions.
+func (s *Server) SetBindErrorsGetter(fn func() map[string]string) {
+	if s.api != nil {
+		s.api.bindErrorsGetter = fn
+	}
+}
+
 // Start opens the HTTP listener and starts the 1Hz WebSocket telemetry broadcaster.
 // If features.webui_enabled is false, Start is a no-op (Headless Pure Relay mode).
 func (s *Server) Start() error {

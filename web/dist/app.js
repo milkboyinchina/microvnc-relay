@@ -6,6 +6,7 @@
   let wsReconnectTimer = null;
   let cachedDevices = [];
   let cachedStatuses = {};
+  let cachedBindErrors = {};
 
   // DOM Elements
   const elUptime = document.getElementById('uptime-val');
@@ -59,6 +60,29 @@
     if (ms > 50) cls = 'med';
     if (ms > 150) cls = 'slow';
     return `<span class="rtt-val ${cls}">${ms.toFixed(1)} ms</span>`;
+  }
+
+  // Floating Toast Notifications
+  function showToast(message, type = 'success') {
+    let container = document.getElementById('toast-container');
+    if (!container) {
+      container = document.createElement('div');
+      container.id = 'toast-container';
+      container.className = 'toast-container';
+      document.body.appendChild(container);
+    }
+
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.innerHTML = `<span>${escapeHTML(message)}</span>`;
+    container.appendChild(toast);
+
+    setTimeout(() => {
+      toast.classList.add('toast-fadeout');
+      setTimeout(() => {
+        if (toast.parentNode) toast.parentNode.removeChild(toast);
+      }, 300);
+    }, 4000);
   }
 
   // Auth & Initial Setup Handling
@@ -164,8 +188,9 @@
           fetchDevices();
           fetchLogs();
         } else {
+          const errData = await res.json().catch(() => ({}));
           if (elLoginError) {
-            elLoginError.textContent = 'Invalid username or password';
+            elLoginError.textContent = errData.error || (res.status === 429 ? 'Too many failed attempts. Account temporarily locked.' : 'Invalid username or password');
             elLoginError.style.display = 'block';
           }
         }
@@ -244,8 +269,14 @@
       renderSessionsTable(data.sessions);
     }
 
-    if (data.device_statuses) {
-      cachedStatuses = data.device_statuses;
+    if (data.bind_errors !== undefined) {
+      cachedBindErrors = data.bind_errors || {};
+    }
+
+    if (data.device_statuses || data.bind_errors !== undefined) {
+      if (data.device_statuses) {
+        cachedStatuses = data.device_statuses;
+      }
       renderDevicesTable();
     }
   }
@@ -260,6 +291,7 @@
         if (data.statuses) {
           cachedStatuses = data.statuses;
         }
+        cachedBindErrors = data.bind_errors || {};
         renderDevicesTable();
       }
     } catch (e) {
@@ -287,9 +319,12 @@
       const enabled = dev.enabled !== undefined ? dev.enabled : (dev.Enabled !== undefined ? dev.Enabled : true);
 
       const st = cachedStatuses[id] || {};
+      const bindErr = cachedBindErrors[id] || '';
       let statusBadge = '<span class="status-badge offline">Offline</span>';
       if (!enabled) {
         statusBadge = '<span class="status-badge pending">Disabled</span>';
+      } else if (bindErr) {
+        statusBadge = `<span class="status-badge conflict" title="${escapeHTML(bindErr)}">⚠️ Port Conflict</span>`;
       } else if (st.online) {
         statusBadge = '<span class="status-badge online">● Online</span>';
       }
@@ -306,6 +341,9 @@
         modeStr = vport > 0 ? 'Mode 1 + 2' : 'Mode 2 (Reverse)';
       }
       if (!portDetails) portDetails = '<span class="text-muted">-</span>';
+      if (enabled && bindErr) {
+        portDetails += `<div style="color:var(--accent-yellow);font-size:11px;margin-top:2px;">⚠️ Port in use</div>`;
+      }
 
       const targetRTT = st.target_rtt_ms ? renderRTTBadge(st.target_rtt_ms) : '<span class="text-muted">-</span>';
 
@@ -371,6 +409,7 @@
         if (confirm(`Are you sure you want to remove target machine "${id}"?`)) {
           const res = await fetch(`/api/v1/devices/${encodeURIComponent(id)}`, { method: 'DELETE' });
           if (res.ok) {
+            showToast(`Target "${id}" removed`, 'warning');
             await fetchDevices();
           }
         }
@@ -440,14 +479,29 @@
           body: JSON.stringify(payload)
         });
         if (res.ok) {
+          const resData = await res.json().catch(() => ({}));
           if (elDeviceModal) elDeviceModal.style.display = 'none';
           await fetchDevices();
+          const targetName = payload.name || payload.id;
+          if (resData.bind_error) {
+            showToast(`⚠️ Target "${targetName}" saved, but ${resData.bind_error}`, 'warning');
+          } else {
+            let detail = '';
+            if (payload.virtual_port > 0) {
+              detail = `listening on port :${payload.virtual_port}`;
+            } else if (payload.mode2_id > 0) {
+              detail = `ready for Mode 2 reverse ID:${payload.mode2_id}`;
+            } else {
+              detail = 'configured';
+            }
+            showToast(isEdit ? `✓ Target "${targetName}" updated!` : `✓ Target "${targetName}" is live! (${detail})`, 'success');
+          }
         } else {
           const err = await res.json().catch(() => ({}));
-          alert(`Error saving device: ${err.error || res.statusText}`);
+          showToast(`⚠️ ${err.error || res.statusText}`, 'error');
         }
       } catch (err) {
-        alert(`Network error saving device: ${err.message}`);
+        showToast(`Network error saving device: ${err.message}`, 'error');
       }
     });
   }

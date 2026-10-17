@@ -105,14 +105,16 @@ Unlike gateways like Apache Guacamole that decode video frames into an uncompres
 
 ## Configuration & NetBird Recipe
 
-`microvnc-relay` is configured via a single `config.yaml`. Here is a production recipe for running on a NetBird node:
+`microvnc-relay` separates static daemon settings (`config.yaml`) from dynamic target machines (`targets.yaml`) so adding or editing targets via the WebUI or CLI never touches your bind addresses or security policies:
 
 ```yaml
+# /etc/microvnc-relay/config.yaml
 server:
   web_bind: "100.64.0.1:8080"  # Bind to your NetBird wt0 interface
   vnc_bind: "100.64.0.1"       # Listeners accessible only via WireGuard mesh
   mode2_reverse_port: 5500     # Reverse VNC target machines connect here
   mode2_viewer_port: 5901      # Viewers connect here specifying matching ID
+  targets_file: "targets.yaml" # Dedicated target list (auto-detected alongside config.yaml)
 
 security:
   auth_enabled: true           # First run prompts you to create admin password
@@ -123,7 +125,10 @@ access_control:
   allowed_subnets:
     - "100.64.0.0/10"          # NetBird overlay subnet only
     - "127.0.0.1/32"
+```
 
+```yaml
+# /etc/microvnc-relay/targets.yaml
 devices:
   - id: "workbench-pi"
     name: "Workbench Pi 2"
@@ -135,9 +140,9 @@ devices:
 ```
 
 ### Hot-Reload vs. Restart
-- **Adding/Editing Devices**: Can be done live in the WebUI or by editing `devices:` in `config.yaml` and running `sudo systemctl reload microvnc-relay` (or `kill -HUP $MAINPID`). Active connections on other ports will **not** be dropped.
+- **Adding/Editing Devices**: Can be done live in the WebUI (with instant port-conflict detection and status toasts) or by editing `targets.yaml` and running `microvnc-relay --reload` (or `sudo systemctl reload microvnc-relay`). Active connections on other ports will **not** be dropped.
 - **System Settings** (`server.*`, `features.*`, `security.*`): Require `sudo systemctl restart microvnc-relay`.
-- **Config Validation**: Test your configuration before restarting with `microvnc-relay -c config.yaml --check-config` (exit code `0` = valid).
+- **Config Validation**: Test your configuration and check for port collisions before restarting with `microvnc-relay -c config.yaml --check-config` (exit code `0` = valid).
 
 ---
 
@@ -154,7 +159,8 @@ To ensure this daemon remains under 35MB RSS and never wears out MicroSD flash s
 
 | Platform | Architecture | System RAM | Process Budget | Measured RSS |
 |---|---|---|---|---|
-| **Raspberry Pi 2 / Orange Pi Zero LTS** | ARMv7 (`armv7l`) | 256MB – 512MB | < 30 MB | **~8.9 MB** |
+| **Raspberry Pi 1 (A/B/B+) & Pi Zero / Zero W** | ARMv6 (`armv6l` / `armhf`, `GOARM=6`) | 256MB – 512MB | < 25 MB | **~8.5 MB** |
+| **Raspberry Pi 2 / Orange Pi Zero LTS** | ARMv7 (`armv7l`, `GOARM=7`) | 256MB – 512MB | < 30 MB | **~8.9 MB** |
 | **Armbian TV Boxes** | ARMv7 / ARM64 | 512MB – 1GB | < 35 MB | **~9.5 MB** |
 | **Raspberry Pi 3/4/5** | ARM64 (`aarch64`) | 1GB – 8GB | < 35 MB | **~9.7 MB** |
 | **Linux Servers & Workstations** | x86-64 (`amd64`) | 1GB+ | < 40 MB | **~10.5 MB** |

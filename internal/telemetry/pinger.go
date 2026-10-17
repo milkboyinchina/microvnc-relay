@@ -130,10 +130,14 @@ func (p *Pinger) Stop() {
 	}
 }
 
-// ProbeAll sweeps all configured devices and prunes stale entries from the status map.
+// ProbeAll sweeps all configured devices with bounded concurrency (max 4 parallel probes)
+// to prevent offline targets from stalling telemetry updates, while pruning stale map entries.
 func (p *Pinger) ProbeAll() {
 	devices := p.cfg.GetDevices()
 	activeIDs := make(map[string]struct{}, len(devices))
+
+	sem := make(chan struct{}, 4)
+	var wg sync.WaitGroup
 
 	for _, dev := range devices {
 		activeIDs[dev.ID] = struct{}{}
@@ -153,8 +157,21 @@ func (p *Pinger) ProbeAll() {
 			p.mu.Unlock()
 			continue
 		}
-		p.ProbeDevice(dev)
+
+		select {
+		case <-p.stopCh:
+			return
+		case sem <- struct{}{}:
+			wg.Add(1)
+			go func(d config.DeviceConfig) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				p.ProbeDevice(d)
+			}(dev)
+		}
 	}
+
+	wg.Wait()
 
 	// Prune removed devices so map size stays strictly bounded to len(devices)
 	p.mu.Lock()

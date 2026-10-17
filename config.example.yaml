@@ -43,6 +43,12 @@ features:
 # Network & Listener Bindings
 # ==============================================================================
 server:
+  # Dedicated file for target definitions (defaults to "targets.yaml" in same dir)
+  # Keeping targets in targets.yaml allows modifying devices via WebUI or CLI
+  # without ever touching or risking corruption of your daemon config.
+  # Reload targets on the fly: microvnc-relay --reload (or systemctl reload)
+  targets_file: "targets.yaml"
+
   # WebUI & API listener (Ignored if features.webui_enabled is false)
   # Bind to "0.0.0.0:8080" for all interfaces, or NetBird IP (e.g. "100.64.0.1:8080")
   # NetBird relay recipe: use the wt0 address only so the dashboard never hits WAN.
@@ -62,14 +68,19 @@ server:
 # Authentication & Security
 # ==============================================================================
 security:
-  # Protect WebUI with session password authentication (Recommended: true)
+  # Protect WebUI with session authentication (Recommended: true)
+  # On first launch with auth_enabled: true, the WebUI prompts you to create
+  # administrator credentials, which are hashed with bcrypt and saved to auth.json.
+  # (To reset password, simply delete auth.json and restart the relay).
   auth_enabled: true
-  username: "admin"
-  # Default password: "admin" (BCrypt hash). Change on first startup!
-  password_hash: "$2a$12$e8N4O1.UqMh0z7e5k8aE1.9JgU6P8f2K4r3B1t0y9u8i7o6p5q4w3"
-  
+
   # Session timeout in minutes
   session_timeout_minutes: 1440
+
+  # Set the Secure attribute on session cookies. Enable when the WebUI is
+  # reached over HTTPS (reverse proxy or overlay TLS); leave false for
+  # plain-HTTP overlay/localhost deployments.
+  secure_cookies: false
 
 # ==============================================================================
 # Access Control & Subnet Whitelist
@@ -130,6 +141,11 @@ telemetry:
 
 # ==============================================================================
 # Registered Targets (VNC or generic TCP)
+# NOTE: In the dual-file configuration, targets are loaded from `targets.yaml`
+# (see `targets.example.yaml`). When targets.yaml exists, it takes precedence.
+# The inline `devices:` block below is preserved for backward compatibility
+# and single-file deployments.
+#
 # Mode 1: virtual_port -> host:port works for any TCP (VNC 5900, RDP 3389,
 # SSH 22, SMB 445/tcp). mode2_id / vnc_server_type are VNC-only.
 # TCP-only: no UDP, no load balancing (1:1 mapping), no TLS termination.

@@ -221,6 +221,28 @@ func TestDeviceCRUDAndMetricsEndpoints(t *testing.T) {
 		t.Fatalf("expected 2 devices in cfg, got %d", len(cfg.GetDevices()))
 	}
 
+	// 2b. POST /api/v1/devices with colliding virtual_port -> 409 Conflict
+	conflictDev := config.DeviceConfig{
+		ID:          "kiosk-conflict",
+		Name:        "Kiosk Conflict",
+		Host:        "192.168.1.56",
+		Port:        5900,
+		VirtualPort: 5912, // collides with kiosk-02
+		Enabled:     true,
+	}
+	conflictBody, _ := json.Marshal(conflictDev)
+	respConflict, err := http.Post(addr+"/api/v1/devices", "application/json", bytes.NewReader(conflictBody))
+	if err != nil {
+		t.Fatalf("POST conflict device: %v", err)
+	}
+	_ = respConflict.Body.Close()
+	if respConflict.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict on port collision, got %d", respConflict.StatusCode)
+	}
+	if len(cfg.GetDevices()) != 2 {
+		t.Fatalf("expected devices count to remain 2 after conflict, got %d", len(cfg.GetDevices()))
+	}
+
 	// 3. DELETE /api/v1/devices/kiosk-02
 	reqDel, _ := http.NewRequest(http.MethodDelete, addr+"/api/v1/devices/kiosk-02", nil)
 	respDel, err := http.DefaultClient.Do(reqDel)

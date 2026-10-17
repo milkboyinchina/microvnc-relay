@@ -25,9 +25,11 @@ type APIHandler struct {
 	appLogger      *logger.Logger
 	auth           *AuthManager
 	wsHub          *WSHub
-	startTime      time.Time
-	mode1Reloader  func([]config.DeviceConfig) error
-	version        string
+	startTime        time.Time
+	mode1Reloader    func([]config.DeviceConfig) error
+	bindErrorsGetter func() map[string]string
+	version          string
+	limiter          *LoginRateLimiter
 }
 
 // NewAPIHandler initializes the API router and telemetry hub.
@@ -53,6 +55,7 @@ func NewAPIHandler(
 		startTime:     time.Now(),
 		mode1Reloader: mode1Reloader,
 		version:       version,
+		limiter:       NewLoginRateLimiter(),
 	}
 }
 
@@ -133,6 +136,31 @@ func (a *APIHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	clientIP := ExtractClientIP(r)
+
+	// Check if this IP is currently locked out or subject to progressive delay
+	locked, remaining, delay := a.limiter.Check(clientIP)
+	if locked {
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error":               "Too many failed login attempts. Account temporarily locked for security.",
+			"retry_after_seconds": int(remaining.Seconds()),
+		})
+		return
+	}
+
+	// Progressive-delay gate: reject immediately with 429 instead of sleeping.
+	// A sleeping handler pins a goroutine and socket per attempt — a
+	// self-inflicted slowloris on a single-core Pi (audit C12 / Gate 0).
+	if delay > 0 {
+		retryAfter := int(delay.Seconds()) + 1
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error":               "Too many failed login attempts. Please retry shortly.",
+			"retry_after_seconds": retryAfter,
+		})
+		return
+	}
+
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -143,17 +171,21 @@ func (a *APIHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !a.auth.VerifyCredentials(req.Username, req.Password) {
+		lockedNow, _, lockoutDur := a.limiter.RecordFailure(clientIP)
+		if lockedNow {
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"error":               "Too many failed login attempts. Locked out for 15 minutes.",
+				"retry_after_seconds": int(lockoutDur.Seconds()),
+			})
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "Invalid credentials")
 		return
 	}
 
+	a.limiter.RecordSuccess(clientIP)
 	token := a.auth.CreateSession(req.Username)
 	a.auth.SetSessionCookie(w, token)
-
-	// Persist potentially auto-upgraded bcrypt password
-	if a.configPath != "" {
-		_ = a.cfg.Save(a.configPath)
-	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -180,8 +212,9 @@ func (a *APIHandler) handleDevices(w http.ResponseWriter, r *http.Request) {
 			statuses = a.pinger.GetAllStatuses()
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"devices":  devices,
-			"statuses": statuses,
+			"devices":     devices,
+			"statuses":    statuses,
+			"bind_errors": a.getBindErrors(),
 		})
 
 	case http.MethodPost:
@@ -192,31 +225,46 @@ func (a *APIHandler) handleDevices(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if _, exists := a.cfg.FindDevice(dev.ID); exists {
-			writeError(w, http.StatusBadRequest, "device ID already exists")
+			writeError(w, http.StatusConflict, "device ID already exists")
 			return
 		}
 
 		if err := a.cfg.AddOrUpdateDevice(dev); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+			status := http.StatusBadRequest
+			if strings.Contains(err.Error(), "collision") || strings.Contains(err.Error(), "conflict") {
+				status = http.StatusConflict
+			}
+			writeError(w, status, err.Error())
 			return
 		}
 
-		if a.configPath != "" {
-			if err := a.cfg.Save(a.configPath); err != nil {
-				slog.Error("Failed to save config after adding device", "err", err)
+		if a.configPath != "" || a.cfg.TargetsPath() != "" {
+			if err := a.cfg.SaveTargets(); err != nil {
+				slog.Error("Failed to save targets after adding device", "err", err)
+				writeError(w, http.StatusInternalServerError, "Failed to persist target configuration")
+				return
 			}
 		}
 
+		var reloadErr error
 		if a.mode1Reloader != nil {
-			_ = a.mode1Reloader(a.cfg.GetDevices())
+			reloadErr = a.mode1Reloader(a.cfg.GetDevices())
 		}
 		if a.pinger != nil && dev.Enabled {
 			go a.pinger.ProbeDevice(dev)
 		}
 
+		bindErrs := a.getBindErrors()
+		devBindErr := bindErrs[dev.ID]
+		if devBindErr == "" && reloadErr != nil {
+			devBindErr = reloadErr.Error()
+		}
+
 		writeJSON(w, http.StatusCreated, map[string]any{
-			"ok":     true,
-			"device": dev,
+			"ok":          true,
+			"device":      dev,
+			"bind_error":  devBindErr,
+			"bind_errors": bindErrs,
 		})
 
 	default:
@@ -266,23 +314,40 @@ func (a *APIHandler) handleDeviceByID(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if err := a.cfg.AddOrUpdateDevice(dev); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+			status := http.StatusBadRequest
+			if strings.Contains(err.Error(), "collision") || strings.Contains(err.Error(), "conflict") {
+				status = http.StatusConflict
+			}
+			writeError(w, status, err.Error())
 			return
 		}
 
-		if a.configPath != "" {
-			_ = a.cfg.Save(a.configPath)
+		if a.configPath != "" || a.cfg.TargetsPath() != "" {
+			if err := a.cfg.SaveTargets(); err != nil {
+				slog.Error("Failed to save targets after updating device", "err", err)
+				writeError(w, http.StatusInternalServerError, "Failed to persist target configuration")
+				return
+			}
 		}
+		var reloadErr error
 		if a.mode1Reloader != nil {
-			_ = a.mode1Reloader(a.cfg.GetDevices())
+			reloadErr = a.mode1Reloader(a.cfg.GetDevices())
 		}
 		if a.pinger != nil && dev.Enabled {
 			go a.pinger.ProbeDevice(dev)
 		}
 
+		bindErrs := a.getBindErrors()
+		devBindErr := bindErrs[dev.ID]
+		if devBindErr == "" && reloadErr != nil {
+			devBindErr = reloadErr.Error()
+		}
+
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":     true,
-			"device": dev,
+			"ok":          true,
+			"device":      dev,
+			"bind_error":  devBindErr,
+			"bind_errors": bindErrs,
 		})
 
 	case http.MethodDelete:
@@ -291,8 +356,12 @@ func (a *APIHandler) handleDeviceByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if a.configPath != "" {
-			_ = a.cfg.Save(a.configPath)
+		if a.configPath != "" || a.cfg.TargetsPath() != "" {
+			if err := a.cfg.SaveTargets(); err != nil {
+				slog.Error("Failed to save targets after deleting device", "err", err)
+				writeError(w, http.StatusInternalServerError, "Failed to persist target configuration")
+				return
+			}
 		}
 		if a.mode1Reloader != nil {
 			_ = a.mode1Reloader(a.cfg.GetDevices())
@@ -441,10 +510,18 @@ func (a *APIHandler) BuildTelemetryPayload() []byte {
 		"metrics":         metrics,
 		"sessions":        sessions,
 		"device_statuses": statuses,
+		"bind_errors":     a.getBindErrors(),
 	}
 
 	data, _ := json.Marshal(payload)
 	return data
+}
+
+func (a *APIHandler) getBindErrors() map[string]string {
+	if a.bindErrorsGetter != nil {
+		return a.bindErrorsGetter()
+	}
+	return nil
 }
 
 func (a *APIHandler) findDevice(id string) (config.DeviceConfig, bool) {
