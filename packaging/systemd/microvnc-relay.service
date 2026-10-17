@@ -27,6 +27,13 @@ ProtectHome=true
 NoNewPrivileges=true
 PrivateTmp=true
 
+# ProtectSystem=full mounts /etc read-only. The relay must write auth.json and
+# targets.yaml there, and its PID file under /run. RuntimeDirectory creates
+# /run/microvnc-relay owned by the service user.
+RuntimeDirectory=microvnc-relay
+RuntimeDirectoryMode=0750
+ReadWritePaths=/etc/microvnc-relay /run/microvnc-relay
+
 # Logging directly to systemd journal (avoids SD card flash wearout)
 StandardOutput=journal
 StandardError=journal

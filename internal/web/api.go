@@ -311,26 +311,18 @@ func (a *APIHandler) handleDevices(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if _, exists := a.cfg.FindDevice(dev.ID); exists {
-			writeError(w, http.StatusConflict, "device ID already exists")
-			return
-		}
-
-		if err := a.cfg.AddOrUpdateDevice(dev); err != nil {
-			status := http.StatusBadRequest
-			if strings.Contains(err.Error(), "collision") || strings.Contains(err.Error(), "conflict") {
-				status = http.StatusConflict
+		err := a.cfg.ApplyDeviceTransaction(func(devices []config.DeviceConfig) ([]config.DeviceConfig, error) {
+			for _, existing := range devices {
+				if existing.ID == dev.ID {
+					return nil, errDeviceExists
+				}
 			}
-			writeError(w, status, err.Error())
+			return append(devices, dev), nil
+		})
+		if err != nil {
+			slog.Error("failed to add device", "device_id", dev.ID, "err", err)
+			writeDeviceTransactionError(w, err)
 			return
-		}
-
-		if a.configPath != "" || a.cfg.TargetsPath() != "" {
-			if err := a.cfg.SaveTargets(); err != nil {
-				slog.Error("Failed to save targets after adding device", "err", err)
-				writeError(w, http.StatusInternalServerError, "Failed to persist target configuration")
-				return
-			}
 		}
 
 		var reloadErr error
@@ -393,27 +385,29 @@ func (a *APIHandler) handleDeviceByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "Invalid JSON payload")
 			return
 		}
-		if _, exists := a.cfg.FindDevice(id); !exists {
-			writeError(w, http.StatusNotFound, "Device not found")
+		if dev.ID == "" {
+			dev.ID = id
+		}
+		if dev.ID != id {
+			writeError(w, http.StatusBadRequest, "device ID cannot be changed")
 			return
 		}
 
-		if err := a.cfg.AddOrUpdateDevice(dev); err != nil {
-			status := http.StatusBadRequest
-			if strings.Contains(err.Error(), "collision") || strings.Contains(err.Error(), "conflict") {
-				status = http.StatusConflict
+		err := a.cfg.ApplyDeviceTransaction(func(devices []config.DeviceConfig) ([]config.DeviceConfig, error) {
+			for i := range devices {
+				if devices[i].ID == id {
+					devices[i] = dev
+					return devices, nil
+				}
 			}
-			writeError(w, status, err.Error())
+			return nil, errDeviceNotFound
+		})
+		if err != nil {
+			slog.Error("failed to update device", "device_id", id, "err", err)
+			writeDeviceTransactionError(w, err)
 			return
 		}
 
-		if a.configPath != "" || a.cfg.TargetsPath() != "" {
-			if err := a.cfg.SaveTargets(); err != nil {
-				slog.Error("Failed to save targets after updating device", "err", err)
-				writeError(w, http.StatusInternalServerError, "Failed to persist target configuration")
-				return
-			}
-		}
 		var reloadErr error
 		if a.mode1Reloader != nil {
 			reloadErr = a.mode1Reloader(a.cfg.GetDevices())
@@ -433,18 +427,20 @@ func (a *APIHandler) handleDeviceByID(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case http.MethodDelete:
-		if !a.cfg.DeleteDevice(id) {
-			writeError(w, http.StatusNotFound, "Device not found")
+		err := a.cfg.ApplyDeviceTransaction(func(devices []config.DeviceConfig) ([]config.DeviceConfig, error) {
+			for i := range devices {
+				if devices[i].ID == id {
+					return append(devices[:i], devices[i+1:]...), nil
+				}
+			}
+			return nil, errDeviceNotFound
+		})
+		if err != nil {
+			slog.Error("failed to delete device", "device_id", id, "err", err)
+			writeDeviceTransactionError(w, err)
 			return
 		}
 
-		if a.configPath != "" || a.cfg.TargetsPath() != "" {
-			if err := a.cfg.SaveTargets(); err != nil {
-				slog.Error("Failed to save targets after deleting device", "err", err)
-				writeError(w, http.StatusInternalServerError, "Failed to persist target configuration")
-				return
-			}
-		}
 		if a.mode1Reloader != nil {
 			_ = a.mode1Reloader(a.cfg.GetDevices())
 		}
@@ -625,6 +621,26 @@ func readProcessRSSBytes() uint64 {
 		}
 	}
 	return 0
+}
+
+var (
+	errDeviceExists   = errors.New("device ID already exists")
+	errDeviceNotFound = errors.New("device not found")
+)
+
+func writeDeviceTransactionError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, config.ErrPersistence):
+		writeError(w, http.StatusInternalServerError, "Failed to persist target configuration")
+	case errors.Is(err, errDeviceExists):
+		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, errDeviceNotFound):
+		writeError(w, http.StatusNotFound, err.Error())
+	case strings.Contains(err.Error(), "collision"), strings.Contains(err.Error(), "conflict"):
+		writeError(w, http.StatusConflict, err.Error())
+	default:
+		writeError(w, http.StatusBadRequest, err.Error())
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {

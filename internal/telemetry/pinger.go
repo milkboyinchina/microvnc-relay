@@ -49,6 +49,10 @@ type Pinger struct {
 	wg       sync.WaitGroup
 	started  bool
 	stopped  bool
+
+	intervalMu sync.RWMutex
+	interval   time.Duration
+	intervalCh chan struct{}
 }
 
 // NewPinger creates a new Hop 2 TCP SYN latency engine.
@@ -61,6 +65,11 @@ func NewPinger(
 	if log == nil {
 		log = slog.Default()
 	}
+	intervalSec := cfg.Telemetry.TargetPingIntervalSec
+	if intervalSec <= 0 {
+		intervalSec = 15
+	}
+
 	return &Pinger{
 		cfg:             cfg,
 		log:             log,
@@ -68,7 +77,34 @@ func NewPinger(
 		hasMode2Pending: hasMode2Pending,
 		statuses:        make(map[string]DeviceProbeStatus),
 		stopCh:          make(chan struct{}),
+		interval:        time.Duration(intervalSec) * time.Second,
+		intervalCh:      make(chan struct{}, 1),
 	}
+}
+
+// SetInterval updates the background probe cadence. It is safe to call before
+// or after Start; the scheduler resets its ticker on the next wakeup.
+func (p *Pinger) SetInterval(sec int) {
+	if sec <= 0 {
+		sec = 15
+	}
+	p.intervalMu.Lock()
+	p.interval = time.Duration(sec) * time.Second
+	p.intervalMu.Unlock()
+
+	select {
+	case p.intervalCh <- struct{}{}:
+	default:
+	}
+}
+
+func (p *Pinger) currentInterval() time.Duration {
+	p.intervalMu.RLock()
+	defer p.intervalMu.RUnlock()
+	if p.interval <= 0 {
+		return 15 * time.Second
+	}
+	return p.interval
 }
 
 // Start launches the background TCP SYN polling ticker if features.latency_probes_enabled is true.
@@ -86,13 +122,9 @@ func (p *Pinger) Start() {
 		return
 	}
 
-	intervalSec := p.cfg.Telemetry.TargetPingIntervalSec
-	if intervalSec <= 0 {
-		intervalSec = 15
-	}
-	interval := time.Duration(intervalSec) * time.Second
+	interval := p.currentInterval()
 
-	p.log.Info("started Hop 2 TCP SYN latency pinger", "interval_sec", intervalSec)
+	p.log.Info("started Hop 2 TCP SYN latency pinger", "interval", interval.String())
 
 	p.wg.Add(1)
 	go func() {
@@ -106,6 +138,8 @@ func (p *Pinger) Start() {
 			select {
 			case <-ticker.C:
 				p.ProbeAll()
+			case <-p.intervalCh:
+				ticker.Reset(p.currentInterval())
 			case <-p.stopCh:
 				return
 			}

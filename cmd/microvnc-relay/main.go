@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -164,19 +165,29 @@ func main() {
 		sig := <-sigChan
 		if sig == syscall.SIGHUP {
 			slog.Info("Received SIGHUP, reloading configuration", "path", resolvedConfig, "targets_path", cfg.TargetsPath())
-			if reloaded, err := config.Load(resolvedConfig); err != nil {
+			reloaded, err := config.Load(resolvedConfig)
+			if err != nil {
 				slog.Error("Failed to reload configuration on SIGHUP", "error", err)
-			} else {
-				// Partial hot-reload: reconcile Mode 1 device listeners and update in-memory device list.
-				_ = cfg.SetDevices(reloaded.GetDevices())
-				if err := mode1Mgr.Reload(cfg.GetDevices()); err != nil {
-					slog.Warn("[PORT COLLISION] One or more Mode 1 listeners failed to bind during reload", "error", err)
-				}
-				if cfg.Features.LatencyProbesEnabled {
-					go pinger.ProbeAll()
-				}
-				slog.Info("Targets hot-reloaded successfully", "count", len(cfg.GetDevices()))
+				continue
 			}
+
+			warnings, err := cfg.ApplyReload(reloaded)
+			for _, warning := range warnings {
+				slog.Warn("configuration change requires restart", "detail", warning)
+			}
+			if err != nil {
+				slog.Error("Rejected configuration reload", "error", err)
+				continue
+			}
+
+			if err := mode1Mgr.Reload(cfg.GetDevices()); err != nil {
+				slog.Warn("[PORT COLLISION] One or more Mode 1 listeners failed to bind during reload", "error", err)
+			}
+			pinger.SetInterval(cfg.Telemetry.TargetPingIntervalSec)
+			slog.Info("Configuration hot-reloaded successfully",
+				"devices", len(cfg.GetDevices()),
+				"access_control_enabled", cfg.AccessControl.Enabled,
+			)
 			continue
 		}
 		slog.Info("Received shutdown signal", "signal", sig.String())
@@ -281,6 +292,7 @@ func handleCLIReload() {
 
 func findRunningPID() (int, string, error) {
 	candidates := []string{
+		"/run/microvnc-relay/microvnc-relay.pid",
 		"/run/microvnc-relay.pid",
 		"/var/run/microvnc-relay.pid",
 		"/tmp/microvnc-relay.pid",
@@ -300,6 +312,7 @@ func findRunningPID() (int, string, error) {
 
 func writePIDFile() string {
 	candidates := []string{
+		"/run/microvnc-relay/microvnc-relay.pid",
 		"/run/microvnc-relay.pid",
 		"/var/run/microvnc-relay.pid",
 		"/tmp/microvnc-relay.pid",
@@ -307,6 +320,7 @@ func writePIDFile() string {
 
 	pidStr := fmt.Sprintf("%d\n", os.Getpid())
 	for _, p := range candidates {
+		_ = os.MkdirAll(filepath.Dir(p), 0755)
 		if err := os.WriteFile(p, []byte(pidStr), 0644); err == nil {
 			return p
 		}

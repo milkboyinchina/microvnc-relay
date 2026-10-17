@@ -39,6 +39,9 @@ install -m 0755 "$BIN_SRC" /usr/local/bin/microvnc-relay
 
 # 2. Setup configuration directory and initial config + targets
 mkdir -p /etc/microvnc-relay
+# RuntimeDirectory is recreated by systemd on every boot; create it now for
+# manual runs and for the PID file immediately after installation.
+install -d -m 0750 /run/microvnc-relay
 if [[ ! -f /etc/microvnc-relay/config.yaml ]]; then
     echo "==> Creating default /etc/microvnc-relay/config.yaml from $CONFIG_SRC..."
     cp "$CONFIG_SRC" /etc/microvnc-relay/config.yaml

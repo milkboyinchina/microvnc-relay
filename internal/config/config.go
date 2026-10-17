@@ -30,6 +30,9 @@ type ServerConfig struct {
 	VNCBind          string `yaml:"vnc_bind"`
 	Mode2ReversePort int    `yaml:"mode2_reverse_port"`
 	Mode2ViewerPort  int    `yaml:"mode2_viewer_port"`
+	// TargetsFile is the documented location for the dynamic targets file.
+	// Config.TargetsFile remains as a legacy top-level fallback.
+	TargetsFile string `yaml:"targets_file,omitempty"`
 }
 
 // SecurityConfig holds WebUI authentication credentials and parameters.
@@ -91,7 +94,7 @@ type DeviceConfig struct {
 type Config struct {
 	mu               sync.RWMutex
 	targetsPath      string
-	TargetsFile      string                 `yaml:"targets_file"`
+	TargetsFile      string                 `yaml:"targets_file,omitempty"`
 	Features         FeaturesConfig         `yaml:"features"`
 	Server           ServerConfig           `yaml:"server"`
 	Security         SecurityConfig         `yaml:"security"`
@@ -101,6 +104,14 @@ type Config struct {
 	Telemetry        TelemetryConfig        `yaml:"telemetry"`
 	Devices          []DeviceConfig         `yaml:"devices"`
 }
+
+// ErrPersistence marks a failure to write configuration to disk. Handlers map
+// this to HTTP 500 rather than a validation error.
+var ErrPersistence = errors.New("persist configuration")
+
+// DeviceMutation receives a copy of the current device list and returns the
+// candidate list to validate and persist.
+type DeviceMutation func([]DeviceConfig) ([]DeviceConfig, error)
 
 // DefaultConfig returns a fully populated configuration with production-safe defaults.
 func DefaultConfig() *Config {
@@ -172,8 +183,14 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config yaml: %w", err)
 	}
 
-	// Resolve standalone targets file path (targets.yaml)
-	cfg.targetsPath = ResolveTargetsPath(path, cfg.TargetsFile)
+	// Resolve standalone targets file path. The documented location is
+	// server.targets_file; the top-level targets_file is kept for backward
+	// compatibility with older configs.
+	targetsFile := strings.TrimSpace(cfg.Server.TargetsFile)
+	if targetsFile == "" {
+		targetsFile = cfg.TargetsFile
+	}
+	cfg.targetsPath = ResolveTargetsPath(path, targetsFile)
 
 	// If standalone targets.yaml exists on disk, load targets from it
 	if _, err := os.Stat(cfg.targetsPath); err == nil {
@@ -207,11 +224,19 @@ func (c *Config) validateLocked() error {
 		if c.Server.WebBind == "" {
 			return errors.New("server.web_bind must be specified when webui_enabled is true")
 		}
-		if _, portStr, err := net.SplitHostPort(c.Server.WebBind); err == nil {
-			if p, err := strconv.Atoi(portStr); err == nil && p > 0 {
-				webPort = p
-			}
+		_, portStr, err := net.SplitHostPort(c.Server.WebBind)
+		if err != nil {
+			return fmt.Errorf("invalid server.web_bind %q: %w", c.Server.WebBind, err)
 		}
+		p, err := strconv.Atoi(portStr)
+		if err != nil || p < 0 || p > 65535 {
+			return fmt.Errorf("invalid server.web_bind port %q", portStr)
+		}
+		webPort = p
+	}
+
+	if (c.Features.Mode1Enabled || c.Features.Mode2Enabled) && strings.TrimSpace(c.Server.VNCBind) == "" {
+		return errors.New("server.vnc_bind must be specified when Mode 1 or Mode 2 is enabled")
 	}
 
 	if c.Features.Mode2Enabled {
@@ -346,6 +371,12 @@ func (c *Config) IsIPAllowed(ip net.IP) bool {
 	if !c.AccessControl.Enabled || len(c.AccessControl.allowedNets) == 0 {
 		return true
 	}
+	if ip == nil {
+		return false
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		ip = ip4
+	}
 
 	for _, ipNet := range c.AccessControl.allowedNets {
 		if ipNet.Contains(ip) {
@@ -470,6 +501,104 @@ func (c *Config) AddOrUpdateDevice(dev DeviceConfig) error {
 	}
 
 	return nil
+}
+
+// ApplyDeviceTransaction validates and persists a candidate device list before
+// committing it to memory. A failed validation or write leaves the current
+// in-memory configuration untouched.
+func (c *Config) ApplyDeviceTransaction(mut DeviceMutation) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	candidate, err := mut(append([]DeviceConfig(nil), c.Devices...))
+	if err != nil {
+		return err
+	}
+	if candidate == nil {
+		candidate = []DeviceConfig{}
+	}
+
+	backup := c.Devices
+	c.Devices = candidate
+	if err := c.validateLocked(); err != nil {
+		c.Devices = backup
+		return err
+	}
+
+	if c.targetsPath != "" {
+		if err := SaveTargetsFile(c.targetsPath, candidate); err != nil {
+			c.Devices = backup
+			return fmt.Errorf("%w: %v", ErrPersistence, err)
+		}
+	}
+
+	return nil
+}
+
+// ApplyReload applies the hot-reloadable fields from newCfg and returns a list
+// of changes that require a full restart. Devices, access control, connection
+// limits, and the target ping interval are applied atomically; if validation of
+// the new values fails, the old values are restored.
+func (c *Config) ApplyReload(newCfg *Config) ([]string, error) {
+	if newCfg == nil {
+		return nil, errors.New("reload config is nil")
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var warnings []string
+	addWarning := func(detail string) {
+		warnings = append(warnings, detail)
+	}
+
+	if c.Server.WebBind != newCfg.Server.WebBind ||
+		c.Server.VNCBind != newCfg.Server.VNCBind ||
+		c.Server.Mode2ReversePort != newCfg.Server.Mode2ReversePort ||
+		c.Server.Mode2ViewerPort != newCfg.Server.Mode2ViewerPort {
+		addWarning("server bind/port settings changed; full restart required")
+	}
+	if c.Security != newCfg.Security {
+		addWarning("security settings changed; full restart required")
+	}
+	if c.Logging != newCfg.Logging {
+		addWarning("logging settings changed; full restart required")
+	}
+	if c.Features != newCfg.Features {
+		addWarning("feature flags changed; full restart required")
+	}
+	if c.Telemetry.BroadcastIntervalSec != newCfg.Telemetry.BroadcastIntervalSec {
+		addWarning("telemetry.broadcast_interval_sec changed; full restart required")
+	}
+
+	backupDevices := c.Devices
+	backupACL := c.AccessControl
+	backupLimits := c.ConnectionLimits
+	backupPingInterval := c.Telemetry.TargetPingIntervalSec
+	backupTargetsFile := c.TargetsFile
+	backupServerTargetsFile := c.Server.TargetsFile
+	backupTargetsPath := c.targetsPath
+
+	c.Devices = append([]DeviceConfig(nil), newCfg.Devices...)
+	c.AccessControl = newCfg.AccessControl
+	c.ConnectionLimits = newCfg.ConnectionLimits
+	c.Telemetry.TargetPingIntervalSec = newCfg.Telemetry.TargetPingIntervalSec
+	c.TargetsFile = newCfg.TargetsFile
+	c.Server.TargetsFile = newCfg.Server.TargetsFile
+	c.targetsPath = newCfg.targetsPath
+
+	if err := c.validateLocked(); err != nil {
+		c.Devices = backupDevices
+		c.AccessControl = backupACL
+		c.ConnectionLimits = backupLimits
+		c.Telemetry.TargetPingIntervalSec = backupPingInterval
+		c.TargetsFile = backupTargetsFile
+		c.Server.TargetsFile = backupServerTargetsFile
+		c.targetsPath = backupTargetsPath
+		return warnings, fmt.Errorf("reload validation: %w", err)
+	}
+
+	return warnings, nil
 }
 
 // DeleteDevice removes a device by ID. Returns true if removed, false if not found.
