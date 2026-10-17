@@ -24,12 +24,14 @@ func main() {
 	var (
 		configPath  string
 		showVersion bool
+		checkConfig bool
 	)
 
 	flag.StringVar(&configPath, "config", "", "Path to YAML configuration file")
 	flag.StringVar(&configPath, "c", "", "Path to YAML configuration file (shorthand)")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 	flag.BoolVar(&showVersion, "v", false, "Print version and exit (shorthand)")
+	flag.BoolVar(&checkConfig, "check-config", false, "Validate configuration file and exit (0 = valid, 1 = invalid)")
 	flag.Parse()
 
 	if showVersion {
@@ -46,6 +48,11 @@ func main() {
 	if err != nil {
 		slog.Error("Failed to load configuration", "path", resolvedConfig, "error", err)
 		os.Exit(1)
+	}
+
+	if checkConfig {
+		fmt.Printf("Configuration %s is valid (%d device(s))\n", resolvedConfig, len(cfg.Devices))
+		os.Exit(0)
 	}
 
 	// Initialize dual logger (stderr + fixed O(1) in-memory ring buffer)
@@ -142,6 +149,10 @@ func main() {
 			if reloaded, err := config.Load(resolvedConfig); err != nil {
 				slog.Error("Failed to reload configuration on SIGHUP", "error", err)
 			} else {
+				// Partial hot-reload: only Mode 1 device listeners are reconciled.
+				// All other keys (web_bind, vnc_bind, mode2 ports, features.*,
+				// connection_limits, logging, telemetry, security, access_control)
+				// require a full process restart (systemctl restart).
 				_ = mode1Mgr.Reload(reloaded.GetDevices())
 				if cfg.Features.LatencyProbesEnabled {
 					go pinger.ProbeAll()

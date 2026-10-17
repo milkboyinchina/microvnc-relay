@@ -91,6 +91,14 @@ features:
 | **Dashboard Only** | WebUI + Telemetry (noVNC disabled) | ~6 MB – 8 MB | ~12 MB – 18 MB | Native VNC viewers only (TigerVNC/RealVNC) |
 | **Headless Pure Relay** | Mode 1 / 2 only (WebUI & noVNC OFF) | **~5 MB – 6 MB** | **~8 MB – 12 MB** | **Ultra-constrained 256MB SBCs & IoT gateways** |
 
+### Explicit Non-Goals (Delegate Outward)
+
+Design goal is a NetBird relay node configured via a single `config.yaml` + WebUI, not an `iptables` replacement or full proxy:
+
+* **No UDP relay** — TCP-only `splice(2)` byte-stream keeps memory/CPU bounded. UDP stays on WireGuard/NetBird.
+* **No load balancing** — strictly `1 virtual_port -> 1 host:port`. Delegate to `HAProxy`/`nginx stream` when LB is required.
+* **No TLS termination** — no cert lifecycle or handshake crypto on ARMv7. Delegate to NetBird ChaCha20-Poly1305 or a TLS reverse proxy.
+
 ---
 
 ## 6. State Management & Memory Durability

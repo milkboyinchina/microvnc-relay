@@ -20,8 +20,9 @@ const (
 	mode2PacketLen = 250
 	// mode2ViewerGreeting is the 12-byte RFB greeting sent to Mode II viewers before they transmit ID:xxxx.
 	mode2ViewerGreeting = "RFB 000.000\n"
-	// mode2HandshakeTimeout is the maximum time allowed to complete the ID:xxxx handshake.
-	mode2HandshakeTimeout = 10 * time.Second
+	// defaultMode2HandshakeTimeoutSec is the fallback ID:xxxx handshake deadline
+	// when connection_limits.mode2_handshake_timeout_sec is unset (<= 0).
+	defaultMode2HandshakeTimeoutSec = 5
 )
 
 type pendingServer struct {
@@ -155,6 +156,16 @@ func (m *Mode2Manager) acceptViewerLoop(ln net.Listener) {
 	}
 }
 
+// handshakeTimeout returns the configured Mode 2 ID:xxxx handshake deadline.
+// Requires full restart to take effect (SIGHUP only hot-reloads Mode 1 device lists).
+func (m *Mode2Manager) handshakeTimeout() time.Duration {
+	secs := m.cfg.ConnectionLimits.Mode2HandshakeTimeoutSec
+	if secs <= 0 {
+		secs = defaultMode2HandshakeTimeoutSec
+	}
+	return time.Duration(secs) * time.Second
+}
+
 func (m *Mode2Manager) handleReverseServer(serverConn net.Conn) {
 	remoteIP := ExtractRemoteIP(serverConn.RemoteAddr())
 	if !m.cfg.IsIPAllowed(remoteIP) {
@@ -167,7 +178,7 @@ func (m *Mode2Manager) handleReverseServer(serverConn net.Conn) {
 
 	ConfigureTCPConn(serverConn, m.cfg.ConnectionLimits.TCPKeepAliveSec)
 
-	mode2ID, err := readMode2ID(serverConn, mode2HandshakeTimeout)
+	mode2ID, err := readMode2ID(serverConn, m.handshakeTimeout())
 	if err != nil {
 		m.log.Warn("invalid Mode 2 reverse server handshake",
 			"server_ip", serverConn.RemoteAddr().String(),
@@ -222,7 +233,8 @@ func (m *Mode2Manager) handleViewer(viewerConn net.Conn) {
 
 	ConfigureTCPConn(viewerConn, m.cfg.ConnectionLimits.TCPKeepAliveSec)
 
-	_ = viewerConn.SetWriteDeadline(time.Now().Add(mode2HandshakeTimeout))
+	handshakeTimeout := m.handshakeTimeout()
+	_ = viewerConn.SetWriteDeadline(time.Now().Add(handshakeTimeout))
 	if _, err := io.WriteString(viewerConn, mode2ViewerGreeting); err != nil {
 		m.log.Warn("failed to write Mode 2 viewer greeting",
 			"viewer_ip", viewerConn.RemoteAddr().String(),
@@ -233,7 +245,7 @@ func (m *Mode2Manager) handleViewer(viewerConn net.Conn) {
 	}
 	_ = viewerConn.SetWriteDeadline(time.Time{})
 
-	mode2ID, err := readMode2ID(viewerConn, mode2HandshakeTimeout)
+	mode2ID, err := readMode2ID(viewerConn, handshakeTimeout)
 	if err != nil {
 		m.log.Warn("invalid Mode 2 viewer ID handshake",
 			"viewer_ip", viewerConn.RemoteAddr().String(),

@@ -21,6 +21,7 @@ web/node_modules/
 # Logs and runtime config
 *.log
 /config.yaml
+/auth.json
 
 # OS and Editor files
 .DS_Store

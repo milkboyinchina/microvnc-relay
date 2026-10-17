@@ -40,6 +40,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Implemented First-Run WebUI Administrator Setup modal (`#setup-modal`) and `POST /api/v1/auth/setup` endpoint to securely configure credentials without plaintext defaults.
   - Added dedicated `auth.json` file storage (`0600` permissions) with automatic bcrypt hashing and simple file-deletion password reset capability (`rm auth.json`).
   - Added frontend fallback handling in `web/dist/app.js` and added `TestFirstRunAuthSetupAndReset` integration test.
+- Stress Testing, Benchmarking & Engine Hardening:
+  - Implemented standalone load harness (`cmd/stress-tester`) with automated circuit breaker / dead man's switch.
+  - Added automated race-detected stress tests (`internal/proxy/stress_test.go`) covering concurrent forwarding, Mode 2 race conditions, and abrupt disconnections.
+  - Empirically verified physical Raspberry Pi 2 hardware scaling across 2, 5, and 10 concurrent streams with RSS capped under 9.0 MB and zero file descriptor leaks.
+  - Added `--check-config` CLI flag for dry-run configuration validation.
+  - Added configurable `connection_limits.mode2_handshake_timeout_sec` (default 5s).
+
 
 
 

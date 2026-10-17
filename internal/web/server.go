@@ -61,6 +61,7 @@ func NewServer(
 
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
+	mountDebugBridge(mux)
 
 	// Mount embedded WebUI static assets
 	distFS, err := fs.Sub(webassets.DistFS, "dist")

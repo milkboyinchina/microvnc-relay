@@ -1,5 +1,9 @@
 # ==============================================================================
 # μVNC Relay (MicroVNC Relay) Configuration
+# Lightweight TCP relay + VNC repeater with WebUI — VNC-first, generic TCP-capable.
+# Mode 1 is generic TCP (VNC, RDP, SSH, SMB/tcp, HTTP). Mode 2 / noVNC are VNC-only.
+# Non-goals: no UDP relay, no load balancing, no TLS termination (delegate outward
+# to NetBird/WireGuard, HAProxy/nginx, reverse proxy).
 # ==============================================================================
 
 # ==============================================================================
@@ -18,10 +22,13 @@ features:
   # Disable if you only use native desktop VNC clients to save WebSocket buffers
   novnc_enabled: true
 
-  # Mode 1: Direct port-forwarding & virtual port mapping
+  # Mode 1: Generic TCP port-forwarding (virtual_port -> host:port)
+  # Works for any TCP: VNC 5900, RDP 3389, SSH 22, SMB 445/tcp, HTTP 80.
+  # TCP-only, no UDP. Pure byte-stream, no protocol decoding.
   mode1_enabled: true
 
-  # Mode 2: UltraVNC reverse ID matchmaker (ports 5500 & 5901)
+  # Mode 2: UltraVNC reverse ID matchmaker, VNC-only (ports 5500 & 5901)
+  # Target VNC servers dial out with "ID:xxxx"; viewers pair by the same ID.
   # Disable if all your machines use direct port mappings
   mode2_enabled: true
 
@@ -38,12 +45,14 @@ features:
 server:
   # WebUI & API listener (Ignored if features.webui_enabled is false)
   # Bind to "0.0.0.0:8080" for all interfaces, or NetBird IP (e.g. "100.64.0.1:8080")
+  # NetBird relay recipe: use the wt0 address only so the dashboard never hits WAN.
   web_bind: "0.0.0.0:8080"
 
-  # Base listener IP for Mode 1 direct port-mapped connections
+  # Base listener IP for Mode 1 generic TCP listeners (despite the legacy key name)
+  # Use "0.0.0.0" for LAN, or NetBird wt0 IP (e.g. "100.64.0.1") for mesh-only relay.
   vnc_bind: "0.0.0.0"
 
-  # Port for Mode 2 UltraVNC reverse connections (target servers dial in here)
+  # Ports for Mode 2 UltraVNC reverse connections, VNC-only (target servers dial in here)
   mode2_reverse_port: 5500
 
   # Mode 2 viewer port where clients specify ID:<codeplate>
@@ -68,6 +77,7 @@ security:
 access_control:
   # Restrict incoming connections to specific subnets (CIDR notation)
   # Connections from unlisted subnets are rejected immediately at TCP handshake
+  # NetBird relay recipe: enabled: true + ["100.64.0.0/10"] for mesh-only access.
   enabled: false
   allowed_subnets:
     - "100.64.0.0/10"   # NetBird Mesh Overlay
@@ -82,8 +92,13 @@ connection_limits:
   # TCP keepalive interval to detect and terminate zombie/dropped connections
   tcp_keepalive_sec: 30
 
-  # Connect timeout when probing or establishing link to target VNC servers
+  # Connect timeout when probing or establishing link to target TCP servers
   dial_timeout_sec: 5
+
+  # Maximum time to complete the Mode 2 UltraVNC "ID:xxxx" handshake
+  # (reverse port 5500 + viewer port 5901). Stalled scanners / slowloris
+  # clients are disconnected after this deadline. Requires full restart.
+  mode2_handshake_timeout_sec: 5
 
   # Idle timeout in seconds before closing inactive client sockets (0 = disabled)
   idle_timeout_sec: 0
@@ -110,11 +125,14 @@ logging:
 telemetry:
   # Real-time metrics broadcast interval over WebSocket to WebUI (seconds)
   broadcast_interval_sec: 1
-  # Latency probe frequency to target VNC servers (seconds)
+  # Latency probe frequency to targets (seconds)
   target_ping_interval_sec: 15
 
 # ==============================================================================
-# Registered Target VNC Devices
+# Registered Targets (VNC or generic TCP)
+# Mode 1: virtual_port -> host:port works for any TCP (VNC 5900, RDP 3389,
+# SSH 22, SMB 445/tcp). mode2_id / vnc_server_type are VNC-only.
+# TCP-only: no UDP, no load balancing (1:1 mapping), no TLS termination.
 # ==============================================================================
 devices:
   - id: "pi2-lab"
@@ -142,3 +160,17 @@ devices:
     virtual_port: 5912
     vnc_server_type: "realvnc"
     enabled: true
+
+  # Generic TCP examples (uncomment to use; keep virtual_port unique):
+  # - id: "office-rdp"
+  #   name: "Office PC RDP"
+  #   host: "192.168.1.60"
+  #   port: 3389          # RDP over TCP; RDP-UDP boost not relayed (TCP-only)
+  #   virtual_port: 5920  # Clients connect via <relay-ip>:5920
+  #   enabled: true
+  # - id: "nas-ssh"
+  #   name: "NAS SSH"
+  #   host: "192.168.1.61"
+  #   port: 22
+  #   virtual_port: 5921
+  #   enabled: true
