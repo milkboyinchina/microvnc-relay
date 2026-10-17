@@ -103,8 +103,12 @@ access_control:
 # Connection Timeouts & QoS Bandwidth Limits
 # ==============================================================================
 connection_limits:
-  # TCP keepalive interval to detect and terminate zombie/dropped connections
-  tcp_keepalive_sec: 30
+  # TCP keepalive interval/idle period to detect and terminate zombie links
+  tcp_keepalive_sec: 15
+
+  # Linux TCP_USER_TIMEOUT: how long unacknowledged data may remain before the
+  # kernel fails the connection. Prevents dead peers from holding FDs forever.
+  tcp_user_timeout_sec: 30
 
   # Connect timeout when probing or establishing link to target TCP servers
   dial_timeout_sec: 5
@@ -116,6 +120,10 @@ connection_limits:
 
   # Idle timeout in seconds before closing inactive client sockets (0 = disabled)
   idle_timeout_sec: 0
+
+  # After one direction reaches EOF, close its write side and wait this long for
+  # the other direction to finish before force-closing both sockets.
+  half_close_timeout_sec: 5
 
   # Optional per-session bandwidth cap in KB/s to prevent network choking (0 = unlimited)
   max_session_kbps: 0

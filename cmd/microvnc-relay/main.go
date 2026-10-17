@@ -112,7 +112,9 @@ func main() {
 	mode2Mgr := proxy.NewMode2Manager(cfg, meter, slog.Default())
 	if err := mode2Mgr.Start(); err != nil {
 		slog.Error("[PORT COLLISION] Failed to start Mode 2 repeater listeners", "error", err)
-		mode1Mgr.Stop()
+		stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = mode1Mgr.Stop(stopCtx)
+		cancel()
 		close(stopMeter)
 		os.Exit(1)
 	}
@@ -139,8 +141,10 @@ func main() {
 	if err != nil {
 		slog.Error("Failed to initialize WebUI server", "error", err)
 		pinger.Stop()
-		mode2Mgr.Stop()
-		mode1Mgr.Stop()
+		stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = mode2Mgr.Stop(stopCtx)
+		_ = mode1Mgr.Stop(stopCtx)
+		cancel()
 		close(stopMeter)
 		os.Exit(1)
 	}
@@ -149,8 +153,10 @@ func main() {
 	if err := webServer.Start(); err != nil {
 		slog.Error("[PORT COLLISION] Failed to start WebUI server listener", "error", err)
 		pinger.Stop()
-		mode2Mgr.Stop()
-		mode1Mgr.Stop()
+		stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = mode2Mgr.Stop(stopCtx)
+		_ = mode1Mgr.Stop(stopCtx)
+		cancel()
 		close(stopMeter)
 		os.Exit(1)
 	}
@@ -195,13 +201,28 @@ func main() {
 		break
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	_ = webServer.Stop(shutdownCtx)
 
+	// Stop admitting new sessions, then close active streams and wait for them
+	// to drain within the bounded grace period.
+	mode1Mgr.StopAccepting()
+	mode2Mgr.StopAccepting()
+	meter.BeginShutdown()
+	if remaining, err := meter.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("Session shutdown incomplete", "err", err, "remaining_sessions", remaining)
+	} else {
+		slog.Info("All active sessions closed")
+	}
+	if err := mode1Mgr.Stop(shutdownCtx); err != nil {
+		slog.Warn("Mode 1 shutdown incomplete", "err", err)
+	}
+	if err := mode2Mgr.Stop(shutdownCtx); err != nil {
+		slog.Warn("Mode 2 shutdown incomplete", "err", err)
+	}
+
 	pinger.Stop()
-	mode2Mgr.Stop()
-	mode1Mgr.Stop()
 	close(stopMeter)
 	slog.Info("Shutting down μVNC Relay gracefully.")
 }

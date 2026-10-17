@@ -55,11 +55,13 @@ type AccessControlConfig struct {
 
 // ConnectionLimitsConfig manages timeouts, keepalive, and QoS bandwidth limits.
 type ConnectionLimitsConfig struct {
-	TCPKeepAliveSec         int `yaml:"tcp_keepalive_sec"`
-	DialTimeoutSec          int `yaml:"dial_timeout_sec"`
-	IdleTimeoutSec          int `yaml:"idle_timeout_sec"`
-	MaxSessionKBps          int `yaml:"max_session_kbps"`
+	TCPKeepAliveSec          int `yaml:"tcp_keepalive_sec"`
+	TCPUserTimeoutSec        int `yaml:"tcp_user_timeout_sec"`
+	DialTimeoutSec           int `yaml:"dial_timeout_sec"`
+	IdleTimeoutSec           int `yaml:"idle_timeout_sec"`
+	MaxSessionKBps           int `yaml:"max_session_kbps"`
 	Mode2HandshakeTimeoutSec int `yaml:"mode2_handshake_timeout_sec"`
+	HalfCloseTimeoutSec      int `yaml:"half_close_timeout_sec"`
 }
 
 // LoggingConfig manages log file settings and in-memory ring buffer capacity.
@@ -148,11 +150,13 @@ func DefaultConfig() *Config {
 			},
 		},
 		ConnectionLimits: ConnectionLimitsConfig{
-			TCPKeepAliveSec:         30,
-			DialTimeoutSec:          5,
-			IdleTimeoutSec:          0,
-			MaxSessionKBps:          0,
+			TCPKeepAliveSec:          15,
+			TCPUserTimeoutSec:        30,
+			DialTimeoutSec:           5,
+			IdleTimeoutSec:           0,
+			MaxSessionKBps:           0,
 			Mode2HandshakeTimeoutSec: 5,
+			HalfCloseTimeoutSec:      5,
 		},
 		Logging: LoggingConfig{
 			DiskLogging:         false,
@@ -292,13 +296,19 @@ func (c *Config) validateLocked() error {
 
 	// Connection limits defaults
 	if c.ConnectionLimits.TCPKeepAliveSec <= 0 {
-		c.ConnectionLimits.TCPKeepAliveSec = 30
+		c.ConnectionLimits.TCPKeepAliveSec = 15
+	}
+	if c.ConnectionLimits.TCPUserTimeoutSec <= 0 {
+		c.ConnectionLimits.TCPUserTimeoutSec = 30
 	}
 	if c.ConnectionLimits.DialTimeoutSec <= 0 {
 		c.ConnectionLimits.DialTimeoutSec = 5
 	}
 	if c.ConnectionLimits.Mode2HandshakeTimeoutSec <= 0 {
 		c.ConnectionLimits.Mode2HandshakeTimeoutSec = 5
+	}
+	if c.ConnectionLimits.HalfCloseTimeoutSec <= 0 {
+		c.ConnectionLimits.HalfCloseTimeoutSec = 5
 	}
 
 	// Telemetry defaults

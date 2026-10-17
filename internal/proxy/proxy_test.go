@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -86,7 +88,7 @@ func TestMode1ManagerEndToEndAndReload(t *testing.T) {
 	if err := m1.Start(); err != nil {
 		t.Fatalf("Mode1Manager.Start failed: %v", err)
 	}
-	defer m1.Stop()
+	defer m1.Stop(context.Background())
 
 	listenAddr := m1.ListenerAddr("pi-signage-01")
 	if listenAddr == "" {
@@ -220,7 +222,7 @@ func TestMode1CIDRRejection(t *testing.T) {
 	if err := m1.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer m1.Stop()
+	defer m1.Stop(context.Background())
 
 	conn, err := net.DialTimeout("tcp", m1.ListenerAddr("restricted-dev"), 2*time.Second)
 	if err != nil {
@@ -263,7 +265,7 @@ func TestMode2UltraVNCMatchmaker(t *testing.T) {
 	if err := m2.Start(); err != nil {
 		t.Fatalf("Mode2Manager.Start: %v", err)
 	}
-	defer m2.Stop()
+	defer m2.Stop(context.Background())
 
 	// 1. Connect synthetic reverse VNC server to Mode2ReversePort sending 250-byte null-padded "ID:1234"
 	revConn, err := net.DialTimeout("tcp", m2.ReverseAddr(), 2*time.Second)
@@ -435,7 +437,7 @@ func TestMode1PortCollisionTracking(t *testing.T) {
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	m1 := NewMode1Manager(cfg, nil, log)
-	defer m1.Stop()
+	defer m1.Stop(context.Background())
 
 	// Start should return an error and record the bind error for "collision-dev"
 	if err := m1.Start(); err == nil {
@@ -456,6 +458,88 @@ func TestMode1PortCollisionTracking(t *testing.T) {
 	bindErrsAfter := m1.GetBindErrors()
 	if len(bindErrsAfter) != 0 {
 		t.Fatalf("expected bind errors cleared after resolving port collision, got: %+v", bindErrsAfter)
+	}
+}
+
+func TestForwardStreamHalfCloseDrainsOppositeDirection(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	serverConnCh := make(chan net.Conn, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err == nil {
+			serverConnCh <- conn
+		}
+	}()
+
+	clientConn, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer clientConn.Close()
+
+	var serverConn net.Conn
+	select {
+	case serverConn = <-serverConnCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out accepting server conn")
+	}
+	defer serverConn.Close()
+
+	limits := config.DefaultConfig().ConnectionLimits
+	limits.HalfCloseTimeoutSec = 2
+
+	forwardDone := make(chan struct{})
+	go func() {
+		ForwardStream(clientConn, serverConn, nil, limits, false)
+		close(forwardDone)
+	}()
+
+	if _, err := clientConn.Write([]byte("ping")); err != nil {
+		t.Fatalf("client write: %v", err)
+	}
+	if err := clientConn.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatalf("client CloseWrite: %v", err)
+	}
+
+	ping := make([]byte, 4)
+	if _, err := io.ReadFull(serverConn, ping); err != nil {
+		t.Fatalf("server read ping: %v", err)
+	}
+	if string(ping) != "ping" {
+		t.Fatalf("server got %q, want ping", ping)
+	}
+
+	// The forwarder must propagate the client's half-close as EOF.
+	eofBuf := make([]byte, 1)
+	if _, err := serverConn.Read(eofBuf); !errors.Is(err, io.EOF) {
+		t.Fatalf("server expected EOF after client half-close, got %v", err)
+	}
+
+	if _, err := serverConn.Write([]byte("pong")); err != nil {
+		t.Fatalf("server write pong: %v", err)
+	}
+	if err := serverConn.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatalf("server CloseWrite: %v", err)
+	}
+
+	pong := make([]byte, 4)
+	_ = clientConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := io.ReadFull(clientConn, pong); err != nil {
+		t.Fatalf("client read pong: %v", err)
+	}
+	if string(pong) != "pong" {
+		t.Fatalf("client got %q, want pong", pong)
+	}
+
+	select {
+	case <-forwardDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("ForwardStream did not finish after both directions closed")
 	}
 }
 

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -44,10 +45,11 @@ type Mode2Manager struct {
 	mu         sync.Mutex
 	reverseLn  net.Listener
 	viewerLn   net.Listener
-	pending    map[int]*pendingServer
-	stopCh     chan struct{}
-	wg         sync.WaitGroup
-	stopped    bool
+	pending  map[int]*pendingServer
+	stopCh   chan struct{}
+	acceptWG sync.WaitGroup
+	connWG   sync.WaitGroup
+	stopped  bool
 }
 
 // NewMode2Manager initializes a Mode 2 UltraVNC reverse ID matchmaker.
@@ -99,7 +101,7 @@ func (m *Mode2Manager) Start() error {
 		"viewer_listen", viewLn.Addr().String(),
 	)
 
-	m.wg.Add(2)
+	m.acceptWG.Add(2)
 	go m.acceptReverseLoop(revLn)
 	go m.acceptViewerLoop(viewLn)
 
@@ -107,7 +109,7 @@ func (m *Mode2Manager) Start() error {
 }
 
 func (m *Mode2Manager) acceptReverseLoop(ln net.Listener) {
-	defer m.wg.Done()
+	defer m.acceptWG.Done()
 
 	for {
 		conn, err := ln.Accept()
@@ -124,16 +126,16 @@ func (m *Mode2Manager) acceptReverseLoop(ln net.Listener) {
 			}
 		}
 
-		m.wg.Add(1)
+		m.connWG.Add(1)
 		go func(c net.Conn) {
-			defer m.wg.Done()
+			defer m.connWG.Done()
 			m.handleReverseServer(c)
 		}(conn)
 	}
 }
 
 func (m *Mode2Manager) acceptViewerLoop(ln net.Listener) {
-	defer m.wg.Done()
+	defer m.acceptWG.Done()
 
 	for {
 		conn, err := ln.Accept()
@@ -150,9 +152,9 @@ func (m *Mode2Manager) acceptViewerLoop(ln net.Listener) {
 			}
 		}
 
-		m.wg.Add(1)
+		m.connWG.Add(1)
 		go func(c net.Conn) {
-			defer m.wg.Done()
+			defer m.connWG.Done()
 			m.handleViewer(c)
 		}(conn)
 	}
@@ -178,7 +180,7 @@ func (m *Mode2Manager) handleReverseServer(serverConn net.Conn) {
 		return
 	}
 
-	ConfigureTCPConn(serverConn, m.cfg.ConnectionLimits.TCPKeepAliveSec)
+	ConfigureTCPConn(serverConn, m.cfg.ConnectionLimits.TCPKeepAliveSec, m.cfg.ConnectionLimits.TCPUserTimeoutSec)
 
 	mode2ID, err := readMode2ID(serverConn, m.handshakeTimeout())
 	if err != nil {
@@ -251,7 +253,7 @@ func (m *Mode2Manager) handleViewer(viewerConn net.Conn) {
 		return
 	}
 
-	ConfigureTCPConn(viewerConn, m.cfg.ConnectionLimits.TCPKeepAliveSec)
+	ConfigureTCPConn(viewerConn, m.cfg.ConnectionLimits.TCPKeepAliveSec, m.cfg.ConnectionLimits.TCPUserTimeoutSec)
 
 	handshakeTimeout := m.handshakeTimeout()
 	_ = viewerConn.SetWriteDeadline(time.Now().Add(handshakeTimeout))
@@ -334,6 +336,11 @@ func (m *Mode2Manager) handleViewer(viewerConn net.Conn) {
 			serverConn.RemoteAddr().String(),
 			closeBoth,
 		)
+		if sess == nil {
+			m.log.Warn("Mode 2 session rejected during shutdown", "mode2_id", mode2ID, "device_id", deviceID)
+			closeBoth()
+			return
+		}
 		defer m.meter.UnregisterSession(sess.ID)
 	}
 
@@ -410,11 +417,13 @@ func (m *Mode2Manager) ViewerAddr() string {
 	return ""
 }
 
-// Stop closes both Mode 2 listeners, disconnects any waiting reverse servers, and waits for handlers.
-func (m *Mode2Manager) Stop() {
+// StopAccepting closes both Mode 2 listeners and prevents new handshakes.
+// Waiting reverse servers are closed by Stop.
+func (m *Mode2Manager) StopAccepting() {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if m.stopped {
-		m.mu.Unlock()
 		return
 	}
 	m.stopped = true
@@ -425,13 +434,37 @@ func (m *Mode2Manager) Stop() {
 	if m.viewerLn != nil {
 		_ = m.viewerLn.Close()
 	}
+}
+
+// Stop closes listeners, disconnects waiting reverse servers, and waits for
+// accept loops and handlers bounded by ctx.
+func (m *Mode2Manager) Stop(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.StopAccepting()
+
+	m.mu.Lock()
 	for id, ps := range m.pending {
 		_ = ps.conn.Close()
 		delete(m.pending, id)
 	}
 	m.mu.Unlock()
 
-	m.wg.Wait()
+	m.acceptWG.Wait()
+
+	done := make(chan struct{})
+	go func() {
+		m.connWG.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("mode2 shutdown timed out with active handlers: %w", ctx.Err())
+	}
 }
 
 // readMode2ID reads the UltraVNC Mode II "ID:xxxx" handshake from conn.

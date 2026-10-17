@@ -8,6 +8,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -98,7 +99,7 @@ func TestStressConcurrentMode1Forwarding(t *testing.T) {
 	if err := m1.Start(); err != nil {
 		t.Fatalf("Mode1Manager.Start: %v", err)
 	}
-	defer m1.Stop()
+	defer m1.Stop(context.Background())
 
 	payload := bytes.Repeat([]byte("VNCFRAME"), 8192) // 64KB
 	var wg sync.WaitGroup
@@ -182,7 +183,7 @@ func TestStressMode2RaceConditions(t *testing.T) {
 	if err := m2.Start(); err != nil {
 		t.Fatalf("Mode2Manager.Start: %v", err)
 	}
-	defer m2.Stop()
+	defer m2.Stop(context.Background())
 
 	const pairs = 10
 	var wg sync.WaitGroup
@@ -296,7 +297,7 @@ func TestStressAbruptDisconnections(t *testing.T) {
 	if err := m1.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer m1.Stop()
+	defer m1.Stop(context.Background())
 	addr := m1.ListenerAddr("kill-dev")
 
 	for i := 0; i < 100; i++ {

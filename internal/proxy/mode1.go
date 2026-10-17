@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -25,7 +26,8 @@ type Mode1Manager struct {
 	mu         sync.Mutex
 	listeners  map[string]*mode1Listener
 	bindErrors map[string]string
-	wg         sync.WaitGroup
+	acceptWG   sync.WaitGroup
+	connWG     sync.WaitGroup
 	stopped    bool
 }
 
@@ -142,13 +144,13 @@ func (m *Mode1Manager) startDeviceListenerLocked(dev config.DeviceConfig) error 
 		"target", net.JoinHostPort(dev.Host, fmt.Sprintf("%d", dev.Port)),
 	)
 
-	m.wg.Add(1)
+	m.acceptWG.Add(1)
 	go m.acceptLoop(m1)
 	return nil
 }
 
 func (m *Mode1Manager) acceptLoop(m1 *mode1Listener) {
-	defer m.wg.Done()
+	defer m.acceptWG.Done()
 
 	for {
 		clientConn, err := m1.listener.Accept()
@@ -169,15 +171,17 @@ func (m *Mode1Manager) acceptLoop(m1 *mode1Listener) {
 		dev := m1.device
 		m.mu.Unlock()
 
-		m.wg.Add(1)
+		m.connWG.Add(1)
 		go func(conn net.Conn, d config.DeviceConfig) {
-			defer m.wg.Done()
+			defer m.connWG.Done()
 			m.handleClient(conn, d)
 		}(clientConn, dev)
 	}
 }
 
 func (m *Mode1Manager) handleClient(clientConn net.Conn, dev config.DeviceConfig) {
+	ConfigureTCPConn(clientConn, m.cfg.ConnectionLimits.TCPKeepAliveSec, m.cfg.ConnectionLimits.TCPUserTimeoutSec)
+
 	remoteIP := ExtractRemoteIP(clientConn.RemoteAddr())
 	if !m.cfg.IsIPAllowed(remoteIP) {
 		m.log.Warn("rejected Mode 1 client outside CIDR allowlist",
@@ -206,6 +210,7 @@ func (m *Mode1Manager) handleClient(clientConn net.Conn, dev config.DeviceConfig
 		_ = clientConn.Close()
 		return
 	}
+	ConfigureTCPConn(targetConn, m.cfg.ConnectionLimits.TCPKeepAliveSec, m.cfg.ConnectionLimits.TCPUserTimeoutSec)
 
 	closeBoth := func() {
 		_ = clientConn.Close()
@@ -222,6 +227,11 @@ func (m *Mode1Manager) handleClient(clientConn net.Conn, dev config.DeviceConfig
 			targetAddr,
 			closeBoth,
 		)
+		if sess == nil {
+			m.log.Warn("Mode 1 session rejected during shutdown", "device_id", dev.ID)
+			closeBoth()
+			return
+		}
 		sess.SetTargetRTT(dialRTT)
 		defer m.meter.UnregisterSession(sess.ID)
 	}
@@ -274,11 +284,13 @@ func (m *Mode1Manager) GetBindErrors() map[string]string {
 	return out
 }
 
-// Stop closes all active Mode 1 listeners and waits for active handlers to finish.
-func (m *Mode1Manager) Stop() {
+// StopAccepting closes all Mode 1 listeners and prevents new sessions. Active
+// sessions are closed by TrafficMeter.Shutdown.
+func (m *Mode1Manager) StopAccepting() {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if m.stopped {
-		m.mu.Unlock()
 		return
 	}
 	m.stopped = true
@@ -288,7 +300,27 @@ func (m *Mode1Manager) Stop() {
 		delete(m.listeners, id)
 	}
 	m.bindErrors = make(map[string]string)
-	m.mu.Unlock()
+}
 
-	m.wg.Wait()
+// Stop closes listeners and waits for accept loops and active handlers. The
+// wait is bounded by ctx; a timed-out shutdown reports the remaining handlers.
+func (m *Mode1Manager) Stop(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.StopAccepting()
+	m.acceptWG.Wait()
+
+	done := make(chan struct{})
+	go func() {
+		m.connWG.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("mode1 shutdown timed out with active handlers: %w", ctx.Err())
+	}
 }

@@ -78,6 +78,11 @@ func NewServer(
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		ConnState: func(conn net.Conn, state http.ConnState) {
+			if state == http.StateNew {
+				proxy.ConfigureTCPConn(conn, cfg.ConnectionLimits.TCPKeepAliveSec, cfg.ConnectionLimits.TCPUserTimeoutSec)
+			}
+		},
 	}
 
 	return &Server{
