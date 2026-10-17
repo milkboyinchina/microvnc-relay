@@ -250,9 +250,6 @@ func (a *APIHandler) handleDevices(w http.ResponseWriter, r *http.Request) {
 		if a.mode1Reloader != nil {
 			reloadErr = a.mode1Reloader(a.cfg.GetDevices())
 		}
-		if a.pinger != nil && dev.Enabled {
-			go a.pinger.ProbeDevice(dev)
-		}
 
 		bindErrs := a.getBindErrors()
 		devBindErr := bindErrs[dev.ID]
@@ -333,9 +330,6 @@ func (a *APIHandler) handleDeviceByID(w http.ResponseWriter, r *http.Request) {
 		if a.mode1Reloader != nil {
 			reloadErr = a.mode1Reloader(a.cfg.GetDevices())
 		}
-		if a.pinger != nil && dev.Enabled {
-			go a.pinger.ProbeDevice(dev)
-		}
 
 		bindErrs := a.getBindErrors()
 		devBindErr := bindErrs[dev.ID]
@@ -365,9 +359,6 @@ func (a *APIHandler) handleDeviceByID(w http.ResponseWriter, r *http.Request) {
 		}
 		if a.mode1Reloader != nil {
 			_ = a.mode1Reloader(a.cfg.GetDevices())
-		}
-		if a.pinger != nil {
-			go a.pinger.ProbeAll()
 		}
 
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})

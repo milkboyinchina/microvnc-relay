@@ -121,16 +121,35 @@ func TestMode1ManagerEndToEndAndReload(t *testing.T) {
 		t.Fatal("echoed payload mismatch")
 	}
 
-	// Verify active session metrics
-	sessions := meter.GetSessions()
-	if len(sessions) != 1 {
-		t.Fatalf("expected 1 active session, got %d", len(sessions))
+	// Verify active session metrics. Byte counters are published immediately
+	// after the corresponding socket write, so give the forwarding goroutine a
+	// brief window to account for the final chunk before snapshotting.
+	var session SessionSnapshot
+	expectedRx := uint64(len(payload))
+	expectedTx := uint64(12 + len(payload))
+	metricDeadline := time.Now().Add(2 * time.Second)
+	for {
+		sessions := meter.GetSessions()
+		if len(sessions) == 1 {
+			session = sessions[0]
+			if session.RxBytesTotal == expectedRx && session.TxBytesTotal == expectedTx {
+				break
+			}
+		}
+		if time.Now().After(metricDeadline) {
+			if len(sessions) != 1 {
+				t.Fatalf("expected 1 active session, got %d", len(sessions))
+			}
+			session = sessions[0]
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if sessions[0].RxBytesTotal != uint64(len(payload)) {
-		t.Errorf("expected RxBytesTotal=%d, got %d", len(payload), sessions[0].RxBytesTotal)
+	if session.RxBytesTotal != expectedRx {
+		t.Errorf("expected RxBytesTotal=%d, got %d", expectedRx, session.RxBytesTotal)
 	}
-	if sessions[0].TxBytesTotal != uint64(12+len(payload)) {
-		t.Errorf("expected TxBytesTotal=%d, got %d", 12+len(payload), sessions[0].TxBytesTotal)
+	if session.TxBytesTotal != expectedTx {
+		t.Errorf("expected TxBytesTotal=%d, got %d", expectedTx, session.TxBytesTotal)
 	}
 
 	// Test dynamic Reload: add second device and remove first device
@@ -155,7 +174,7 @@ func TestMode1ManagerEndToEndAndReload(t *testing.T) {
 	}
 
 	// Force disconnect active session via TrafficMeter
-	if !meter.DisconnectSession(sessions[0].SessionID) {
+	if !meter.DisconnectSession(session.SessionID) {
 		t.Error("expected DisconnectSession to return true")
 	}
 
