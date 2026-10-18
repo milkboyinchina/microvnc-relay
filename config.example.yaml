@@ -118,6 +118,10 @@ connection_limits:
   # clients are disconnected after this deadline. Requires full restart.
   mode2_handshake_timeout_sec: 5
 
+  # How long a viewer that requested an ID waits for a reverse server to dial
+  # in before being disconnected. Bounded by max_pending_handshakes.
+  mode2_viewer_wait_timeout_sec: 10
+
   # Idle timeout in seconds before closing inactive client sockets (0 = disabled)
   idle_timeout_sec: 0
 

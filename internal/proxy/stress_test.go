@@ -177,6 +177,7 @@ func TestStressMode2RaceConditions(t *testing.T) {
 	cfg.Server.Mode2ViewerPort = viewPort
 	cfg.Features.Mode2Enabled = true
 	cfg.Features.BandwidthMeteringEnabled = true
+	cfg.ConnectionLimits.Mode2ViewerWaitTimeoutSec = 1
 
 	meter := NewTrafficMeter(true)
 	m2 := NewMode2Manager(cfg, meter, testLogger())
@@ -265,6 +266,9 @@ func TestStressMode2RaceConditions(t *testing.T) {
 		if m2.HasPendingServer(7000 + i) {
 			t.Errorf("ID %d still pending after contention", 7000+i)
 		}
+	}
+	if left := m2.PendingViewerCount(); left != 0 {
+		t.Fatalf("expected 0 pending viewers after timeouts, got %d", left)
 	}
 	if left := len(meter.GetSessions()); left != 0 {
 		t.Fatalf("expected 0 sessions after race, got %d", left)

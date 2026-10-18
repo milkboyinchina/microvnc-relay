@@ -55,13 +55,14 @@ type AccessControlConfig struct {
 
 // ConnectionLimitsConfig manages timeouts, keepalive, and QoS bandwidth limits.
 type ConnectionLimitsConfig struct {
-	TCPKeepAliveSec          int `yaml:"tcp_keepalive_sec"`
-	TCPUserTimeoutSec        int `yaml:"tcp_user_timeout_sec"`
-	DialTimeoutSec           int `yaml:"dial_timeout_sec"`
-	IdleTimeoutSec           int `yaml:"idle_timeout_sec"`
-	MaxSessionKBps           int `yaml:"max_session_kbps"`
-	Mode2HandshakeTimeoutSec int `yaml:"mode2_handshake_timeout_sec"`
-	HalfCloseTimeoutSec      int `yaml:"half_close_timeout_sec"`
+	TCPKeepAliveSec           int `yaml:"tcp_keepalive_sec"`
+	TCPUserTimeoutSec         int `yaml:"tcp_user_timeout_sec"`
+	DialTimeoutSec            int `yaml:"dial_timeout_sec"`
+	IdleTimeoutSec            int `yaml:"idle_timeout_sec"`
+	MaxSessionKBps            int `yaml:"max_session_kbps"`
+	Mode2HandshakeTimeoutSec  int `yaml:"mode2_handshake_timeout_sec"`
+	Mode2ViewerWaitTimeoutSec int `yaml:"mode2_viewer_wait_timeout_sec"`
+	HalfCloseTimeoutSec       int `yaml:"half_close_timeout_sec"`
 
 	// Hard admission caps. These are deliberately configurable but bounded:
 	// sync.Pool reuses buffers, it does not cap concurrency. Raising these
@@ -158,17 +159,18 @@ func DefaultConfig() *Config {
 			},
 		},
 		ConnectionLimits: ConnectionLimitsConfig{
-			TCPKeepAliveSec:          15,
-			TCPUserTimeoutSec:        30,
-			DialTimeoutSec:           5,
-			IdleTimeoutSec:           0,
-			MaxSessionKBps:           0,
-			Mode2HandshakeTimeoutSec: 5,
-			HalfCloseTimeoutSec:      5,
-			MaxTotalSessions:         32,
-			MaxSessionsPerDevice:     8,
-			MaxPendingHandshakes:     64,
-			MaxWSClients:             8,
+			TCPKeepAliveSec:           15,
+			TCPUserTimeoutSec:         30,
+			DialTimeoutSec:            5,
+			IdleTimeoutSec:            0,
+			MaxSessionKBps:            0,
+			Mode2HandshakeTimeoutSec:  5,
+			Mode2ViewerWaitTimeoutSec: 10,
+			HalfCloseTimeoutSec:       5,
+			MaxTotalSessions:          32,
+			MaxSessionsPerDevice:      8,
+			MaxPendingHandshakes:      64,
+			MaxWSClients:              8,
 		},
 		Logging: LoggingConfig{
 			DiskLogging:         false,
@@ -318,6 +320,9 @@ func (c *Config) validateLocked() error {
 	}
 	if c.ConnectionLimits.Mode2HandshakeTimeoutSec <= 0 {
 		c.ConnectionLimits.Mode2HandshakeTimeoutSec = 5
+	}
+	if c.ConnectionLimits.Mode2ViewerWaitTimeoutSec <= 0 {
+		c.ConnectionLimits.Mode2ViewerWaitTimeoutSec = 10
 	}
 	if c.ConnectionLimits.HalfCloseTimeoutSec <= 0 {
 		c.ConnectionLimits.HalfCloseTimeoutSec = 5
