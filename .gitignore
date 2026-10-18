@@ -39,3 +39,7 @@ GEMINI.md
 .agents/
 .agent/
 
+
+# Local soak artifacts
+/soak-*.csv
+/soak-run.pid
