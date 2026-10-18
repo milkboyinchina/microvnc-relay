@@ -89,6 +89,14 @@ jobs:
           CGO_ENABLED: "0"
         run: go build -tags dev ./cmd/microvnc-relay
 
+      - name: Cross-build armv7 with dev bridge
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: arm
+          GOARM: "7"
+        run: go build -tags dev ./cmd/microvnc-relay ./cmd/synthetic-vnc
+
   govulncheck:
     name: govulncheck
     runs-on: ubuntu-latest

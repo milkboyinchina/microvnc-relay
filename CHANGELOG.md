@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Gate 0 — Phase 1 Audit Hardening
+
+> Physical Raspberry Pi 2 / Pi 1-Zero soak and the first remote CI run remain exit checks. The code-level, race, cross-build, and Docker data-plane evidence is in this tree.
+
+#### Security
+- Token-only first-run setup: a one-time token is printed to stdout/journal; `auth.json` is created with `O_EXCL` and setup is hard-disabled once it exists. No default credentials.
+- Bcrypt work is serialized by a one-slot semaphore; concurrent compares get `429` instead of pinning goroutines.
+- Login limiter keys IPv6 by `/64`, normalizes IPv4-mapped addresses, bounds the map at 256 entries, and evicts the least-offending unlocked entry.
+- Active sessions are capped at 64 with oldest-eviction; WebSocket clients are capped at 8 with oldest-eviction (`1013` close).
+- Same-host WebSocket `Origin` validation, `Sec-WebSocket-Version: 13`, and a 4KB frame cap.
+- Systemd unit can write `auth.json`, `targets.yaml`, and the PID file under `ProtectSystem=full`.
+
+#### Added
+- Transactional device CRUD: validate → atomic persist → commit; failed writes return `500` and roll back in-memory state.
+- SIGHUP applies devices, access-control CIDRs, connection limits, and the target probe interval; restart-only changes warn explicitly.
+- Documented `server.targets_file` resolution with legacy top-level fallback.
+- One shared 4-slot probe scheduler with `TriggerSweep`, per-host jitter (±20%), and `SO_LINGER=0` probes.
+- Keepalive (15s) and Linux `TCP_USER_TIMEOUT=30s` on every accepted/dialed socket; EOF-driven `CloseWrite` with a bounded drain.
+- Authoritative session registry: stop admission, disconnect all, drain within a bounded grace period, report stragglers.
+- Hard admission caps: 32 global / 8 per device / 64 pending handshakes / 8 WebSocket clients; overload telemetry.
+- Mode 2: Accept-time handshake deadlines, bounded pending-viewer queue with timeout, duplicate-ID takeover with `MSG_PEEK`, and single-owner `ack`/`done` pairing.
+- Linux splice-metered forwarding with per-direction 16KB pipes and live byte counters from splice return values; QoS remains the only userspace pacing path.
+- Splice engagement/fallback metrics, admission metrics, and WebSocket rejection metrics.
+- CI: cross-build matrix (ARMv6/ARMv7/ARM64/AMD64/Windows), amd64 race, QEMU ARM tests, `govulncheck`, `goleak`, fuzz targets, dev builds, and a Docker compose integration job.
+- Dev-only Docker harness: Hub → Site DMZ → Floor Pi topology, synthetic VNC targets, RST/drop fault endpoints, direct/chained/abrupt-disconnect/RST/drop/netem/loop scenarios.
+- Installer applies `net.ipv4.tcp_mtu_probing=1`, checks the memory cgroup, and prints the first-run token command.
+- `scripts/prepare-cloned-image.sh` resets machine-id and removes copied credentials/identity state.
+- `scripts/soak.sh` and `scripts/verify-pi2.sh` collect RSS, cgroup memory, Slab, FDs, goroutines, disk writes, and heartbeat data.
+
+#### Changed
+- Go directive bumped to `1.26.9` after `govulncheck` found callable standard-library vulnerabilities in 1.26.0.
+- Default `tcp_keepalive_sec` is now 15; added `tcp_user_timeout_sec` (30) and `half_close_timeout_sec` (5).
+- `max_session_kbps` is documented as the only remaining non-splice forwarding mode.
+- `blueprints/BLUEPRINT.md` Gate 0 items are marked complete; chain-control-plane harness scenarios are explicitly deferred to Phase 2a/b/c.
+
+#### Fixed
+- `server.targets_file` was documented but silently ignored; now resolved and tested.
+- `VerifyCredentials` held the auth write lock during bcrypt, blocking session validation.
+- CRUD persistence failures returned `5xx` but left ghost devices in memory.
+- Probe goroutines created by CRUD handlers bypassed the scheduler and leaked on shutdown.
+- Pinger sweeps outlived `Stop()` and could overlap.
+- Mode 1/2 accept loops could call `WaitGroup.Add` after shutdown began waiting.
+- Mode 2 had a prune-vs-pair socket race and no viewer wait/duplicate-ID policy.
+- Systemd `ProtectSystem=full` made `/etc` read-only, breaking credential and target persistence.
+- `PrivateTmp` hid the `/tmp` PID fallback; the runtime directory is now `/run/microvnc-relay`.
+- A flaky Mode 1 byte-counter test snapshotted before the forwarding goroutine finished.
+
 ### Added
 - Milestone 1 scaffolding: Go module `github.com/milkboyinchina/microvnc-relay` with pure-Go dependencies (`gopkg.in/yaml.v3`, `golang.org/x/crypto`, `golang.org/x/sys`).
 - Configuration package (`internal/config`) with full YAML parsing, CIDR subnet access control, connection limits, and atomic save via temporary file replacement.

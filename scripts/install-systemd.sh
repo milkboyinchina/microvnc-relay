@@ -75,6 +75,8 @@ fi
 # in the unit are inert.
 if ! grep -qw memory /proc/cgroups 2>/dev/null; then
     echo "WARN: memory cgroup is not enabled; systemd MemoryHigh/MemoryMax will not enforce a ceiling." >&2
+elif [[ ! -f /sys/fs/cgroup/memory.max && ! -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+    echo "WARN: memory controller files not found; check cgroup v1/v2 configuration." >&2
 fi
 
 # 5. Install systemd service unit
