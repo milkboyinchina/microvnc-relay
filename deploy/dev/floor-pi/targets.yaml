@@ -1,0 +1,7 @@
+targets:
+  - id: cnc-lathe
+    name: "CNC Lathe (terminal asset)"
+    host: "vnc-target-2"
+    port: 5900
+    virtual_port: 5910
+    enabled: true

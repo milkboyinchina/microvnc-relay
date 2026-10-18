@@ -1,0 +1,31 @@
+server:
+  web_bind: "0.0.0.0:8080"
+  vnc_bind: "0.0.0.0"
+  targets_file: "targets.yaml"
+
+features:
+  webui_enabled: true
+  mode1_enabled: true
+  mode2_enabled: false
+  latency_probes_enabled: false
+  bandwidth_metering_enabled: true
+
+security:
+  auth_enabled: false
+
+access_control:
+  enabled: false
+
+connection_limits:
+  tcp_keepalive_sec: 15
+  tcp_user_timeout_sec: 30
+  dial_timeout_sec: 2
+  half_close_timeout_sec: 5
+  max_total_sessions: 32
+  max_sessions_per_device: 8
+  max_pending_handshakes: 64
+  max_ws_clients: 8
+
+telemetry:
+  target_ping_interval_sec: 5
+  broadcast_interval_sec: 1

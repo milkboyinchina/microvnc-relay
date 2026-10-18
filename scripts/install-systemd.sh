@@ -58,15 +58,36 @@ elif [[ -f /etc/microvnc-relay/targets.yaml ]]; then
     echo "==> Preserving existing /etc/microvnc-relay/targets.yaml"
 fi
 
-# 3. Install systemd service unit
+# 3. Install MTU-probing sysctl. Keep existing unrelated settings intact.
+SYSCTL_FILE="/etc/sysctl.d/99-microvnc-relay.conf"
+if ! grep -qs '^net.ipv4.tcp_mtu_probing[[:space:]]*=' "$SYSCTL_FILE" 2>/dev/null; then
+    echo "==> Enabling net.ipv4.tcp_mtu_probing=1..."
+    {
+        [[ -f "$SYSCTL_FILE" ]] && cat "$SYSCTL_FILE"
+        echo "net.ipv4.tcp_mtu_probing = 1"
+    } > "${SYSCTL_FILE}.tmp"
+    chmod 0644 "${SYSCTL_FILE}.tmp"
+    mv "${SYSCTL_FILE}.tmp" "$SYSCTL_FILE"
+    sysctl --system >/dev/null 2>&1 || sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || true
+fi
+
+# 4. Check that the memory cgroup is available; otherwise MemoryHigh/MemoryMax
+# in the unit are inert.
+if ! grep -qw memory /proc/cgroups 2>/dev/null; then
+    echo "WARN: memory cgroup is not enabled; systemd MemoryHigh/MemoryMax will not enforce a ceiling." >&2
+fi
+
+# 5. Install systemd service unit
 echo "==> Installing systemd unit file..."
 install -m 0644 packaging/systemd/microvnc-relay.service /etc/systemd/system/microvnc-relay.service
 
-# 4. Reload and enable
+# 6. Reload and enable
 systemctl daemon-reload
 systemctl enable microvnc-relay.service
 
 echo "==> Installation complete! To start μVNC Relay now, run:"
 echo "    sudo systemctl start microvnc-relay"
+echo "==> First-run setup token:"
+echo "    sudo journalctl -u microvnc-relay -n 50 | grep -i 'setup token'"
 echo "==> To inspect live logs:"
 echo "    journalctl -u microvnc-relay -f"

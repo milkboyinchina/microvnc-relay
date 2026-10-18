@@ -34,9 +34,18 @@ else
     exit 1
 fi
 
-# 2. File Descriptor & Goroutine Inspection
+# 2. File Descriptor & Kernel Memory Inspection
 FD_COUNT=$(ls -1 "/proc/$PID/fd" 2>/dev/null | wc -l)
 echo "==> Socket & File Descriptors Open: $FD_COUNT"
+
+CGROUP_MEM=$(cat /sys/fs/cgroup/memory.current 2>/dev/null || cat /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null || echo "n/a")
+SLAB_KB=$(awk '/^Slab:/ {print $2}' /proc/meminfo 2>/dev/null || echo "n/a")
+echo "==> Process cgroup memory: $CGROUP_MEM bytes"
+echo "==> Kernel Slab: ${SLAB_KB} kB"
+
+if ! grep -qw memory /proc/cgroups 2>/dev/null; then
+    echo "    [WARN] memory cgroup is not enabled; systemd MemoryHigh/MemoryMax are inert."
+fi
 
 # 3. Disk I/O Check (Zero Disk Writes Protection)
 IO_WRITE_BYTES=$(awk '/write_bytes/ {print $2}' "/proc/$PID/io" 2>/dev/null || echo "0")
@@ -46,6 +55,11 @@ echo "==> Cumulative Process Disk Writes: $IO_WRITE_BYTES bytes"
 WEB_BIND=$(grep "web_bind" /etc/microvnc-relay/config.yaml 2>/dev/null | awk '{print $2}' | tr -d '"' || echo "127.0.0.1:8080")
 if curl -s -f "http://$WEB_BIND/api/v1/auth/status" > /dev/null; then
     echo "    [PASS] WebUI REST API responds on $WEB_BIND"
+
+    GOROUTINES=$(curl -s "http://$WEB_BIND/debug/pprof/goroutine?debug=1" 2>/dev/null | awk '/^goroutine profile: total/ {print $4}' || true)
+    if [[ -n "$GOROUTINES" ]]; then
+        echo "==> Goroutines (dev build): $GOROUTINES"
+    fi
 else
     echo "    [INFO] WebUI disabled or running on non-default port"
 fi

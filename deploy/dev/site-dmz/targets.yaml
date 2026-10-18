@@ -1,0 +1,8 @@
+targets:
+  # Immediate next hop only: the Site DMZ forwards to the Floor Pi relay.
+  - id: to-floor
+    name: "Floor Pi Data-Plane Chain"
+    host: "floor-pi"
+    port: 5910
+    virtual_port: 5910
+    enabled: true

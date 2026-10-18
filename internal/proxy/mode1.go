@@ -237,6 +237,16 @@ func (m *Mode1Manager) handleClient(clientConn net.Conn, dev config.DeviceConfig
 		defer releaseAdmission()
 	}
 
+	if rst, drop := faultActive(); rst {
+		m.log.Warn("Mode 1 fault injection: resetting client", "device_id", dev.ID)
+		RejectConn(clientConn)
+		return
+	} else if drop {
+		m.log.Warn("Mode 1 fault injection: dropping client", "device_id", dev.ID)
+		_ = clientConn.Close()
+		return
+	}
+
 	targetAddr := net.JoinHostPort(dev.Host, fmt.Sprintf("%d", dev.Port))
 	dialTimeout := time.Duration(m.cfg.ConnectionLimits.DialTimeoutSec) * time.Second
 	if dialTimeout <= 0 {

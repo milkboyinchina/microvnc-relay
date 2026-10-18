@@ -167,6 +167,61 @@ devices:
 
 ---
 
+## Development & Gate 0 Verification
+
+Run the fast checks:
+
+```bash
+go test ./...
+go vet ./...
+go test -race ./...
+```
+
+Cross-build the full matrix:
+
+```bash
+CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=6 go build ./...
+CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build ./...
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./...
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build ./...
+```
+
+### Dev-only Docker Data-Plane Harness
+
+`deploy/dev/compose.yaml` builds a four-relay topology (`Hub ➔ Site DMZ ➔ Floor Pi ➔ target`) plus synthetic VNC targets. Each relay binds the real per-hop ports in its own container netns; only the Hub and Site DMZ publish host ports.
+
+```bash
+bash scripts/gate0-compose.sh
+
+# optional tc netem 50ms / 1% loss
+GATE0_WITH_NETEM=1 bash scripts/gate0-compose.sh
+
+# optional A -> B -> A loop; admission caps contain it
+GATE0_WITH_LOOP=1 bash scripts/gate0-compose.sh
+```
+
+This image is built with `-tags dev` and includes `synthetic-vnc`, fault injection (`/debug/fault/rst`, `/debug/fault/drop`), and pprof. It is **not** the production image; production containerization stays in Phase 4.
+
+### Soak Testing
+
+Run from a workstation, never from the Pi itself:
+
+```bash
+bash scripts/soak.sh \
+  --relay 100.100.131.74 \
+  --duration 86400 \
+  --streams 10 \
+  --ssh-host nb-api-apipi
+```
+
+The script repeatedly drives 30s stream ramps, records RSS/cgroup memory/Slab/FD/heartbeat to CSV, and aborts on two missed heartbeats, RSS above 32MB, or available RAM below 400MB.
+
+On the relay host, `scripts/verify-pi2.sh` reports RSS, cgroup memory, kernel Slab, FDs, goroutines (dev build), disk writes, and API health.
+
+### Cloned SD/eMMC Images
+
+`scripts/prepare-cloned-image.sh` regenerates the machine-id, deletes `auth.json`, and removes the future relay identity state file so a cloned card does not share credentials or identity. It deliberately leaves `targets.yaml` for manual review.
+
 ## Explicit Non-Goals (Delegate Outward)
 
 To ensure this daemon remains under 35MB RSS and never wears out MicroSD flash storage:

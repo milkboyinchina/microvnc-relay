@@ -1,0 +1,62 @@
+# Gate 0 dev-only data-plane harness.
+#
+# Each relay runs in its own container network namespace and binds the real
+# per-hop ports (:5910 and :8080). Only the Hub and Site DMZ publish host ports
+# for the test driver. Production containerization stays in Phase 4.
+name: microvnc-gate0
+
+x-relay: &relay
+  build:
+    context: ../..
+    dockerfile: deploy/dev/Dockerfile
+  image: microvnc-relay:gate0-dev
+  restart: "no"
+  stop_grace_period: 15s
+  # Run as the host user so API writes to the bind-mounted config directory
+  # remain owned by the operator and can be restored by the harness script.
+  user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+
+services:
+  hub:
+    <<: *relay
+    command: ["-config", "/etc/microvnc-relay/config.yaml"]
+    volumes:
+      - ./hub:/etc/microvnc-relay
+    ports:
+      - "18080:8080"   # WebUI / metrics
+      - "15910:5910"   # direct target
+      - "15911:5911"   # Hub -> Site DMZ -> Floor Pi -> target
+      - "15912:5912"   # optional loop scenario
+    depends_on:
+      - vnc-target-1
+      - site-dmz
+
+  site-dmz:
+    <<: *relay
+    command: ["-config", "/etc/microvnc-relay/config.yaml"]
+    volumes:
+      - ./site-dmz:/etc/microvnc-relay
+    ports:
+      - "18081:8080"   # fault-injection / dev pprof
+    cap_add:
+      - NET_ADMIN      # optional tc netem experiments
+    depends_on:
+      - floor-pi
+
+  floor-pi:
+    <<: *relay
+    command: ["-config", "/etc/microvnc-relay/config.yaml"]
+    volumes:
+      - ./floor-pi:/etc/microvnc-relay
+    depends_on:
+      - vnc-target-2
+
+  vnc-target-1:
+    <<: *relay
+    entrypoint: ["/usr/local/bin/synthetic-vnc"]
+    command: ["-listen", ":5900", "-mode", "echo"]
+
+  vnc-target-2:
+    <<: *relay
+    entrypoint: ["/usr/local/bin/synthetic-vnc"]
+    command: ["-listen", ":5900", "-mode", "echo"]
