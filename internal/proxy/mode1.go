@@ -20,15 +20,17 @@ type mode1Listener struct {
 
 // Mode1Manager manages dedicated virtual port listeners for Mode 1 direct port-mapped devices.
 type Mode1Manager struct {
-	cfg        *config.Config
-	meter      *TrafficMeter
-	log        *slog.Logger
-	mu         sync.Mutex
-	listeners  map[string]*mode1Listener
-	bindErrors map[string]string
-	acceptWG   sync.WaitGroup
-	connWG     sync.WaitGroup
-	stopped    bool
+	cfg          *config.Config
+	meter        *TrafficMeter
+	log          *slog.Logger
+	mu           sync.Mutex
+	listeners    map[string]*mode1Listener
+	bindErrors   map[string]string
+	acceptWG     sync.WaitGroup
+	connWG       sync.WaitGroup
+	stopped      bool
+	admission    *AdmissionController
+	handshakeSem *Semaphore
 }
 
 // NewMode1Manager creates a new Mode 1 Port-Mapped Proxy manager.
@@ -37,12 +39,19 @@ func NewMode1Manager(cfg *config.Config, meter *TrafficMeter, log *slog.Logger) 
 		log = slog.Default()
 	}
 	return &Mode1Manager{
-		cfg:        cfg,
-		meter:      meter,
-		log:        log,
-		listeners:  make(map[string]*mode1Listener),
-		bindErrors: make(map[string]string),
+		cfg:          cfg,
+		meter:        meter,
+		log:          log,
+		listeners:    make(map[string]*mode1Listener),
+		bindErrors:   make(map[string]string),
+		handshakeSem: NewSemaphore(cfg.ConnectionLimits.MaxPendingHandshakes),
 	}
+}
+
+// SetAdmissionController attaches the process-wide session admission controller.
+// It must be called before Start.
+func (m *Mode1Manager) SetAdmissionController(admission *AdmissionController) {
+	m.admission = admission
 }
 
 // Start opens TCP listeners for all enabled Mode 1 devices in the configuration.
@@ -182,6 +191,29 @@ func (m *Mode1Manager) acceptLoop(m1 *mode1Listener) {
 func (m *Mode1Manager) handleClient(clientConn net.Conn, dev config.DeviceConfig) {
 	ConfigureTCPConn(clientConn, m.cfg.ConnectionLimits.TCPKeepAliveSec, m.cfg.ConnectionLimits.TCPUserTimeoutSec)
 
+	handshakeHeld := false
+	if m.handshakeSem != nil {
+		if !m.handshakeSem.TryAcquire() {
+			if m.admission != nil {
+				m.admission.RecordHandshakeRejection()
+			}
+			m.log.Warn("Mode 1 rejected: pending handshake cap reached",
+				"device_id", dev.ID,
+				"client_ip", clientConn.RemoteAddr().String(),
+			)
+			RejectConn(clientConn)
+			return
+		}
+		handshakeHeld = true
+	}
+	releaseHandshake := func() {
+		if handshakeHeld {
+			m.handshakeSem.Release()
+			handshakeHeld = false
+		}
+	}
+	defer releaseHandshake()
+
 	remoteIP := ExtractRemoteIP(clientConn.RemoteAddr())
 	if !m.cfg.IsIPAllowed(remoteIP) {
 		m.log.Warn("rejected Mode 1 client outside CIDR allowlist",
@@ -190,6 +222,19 @@ func (m *Mode1Manager) handleClient(clientConn net.Conn, dev config.DeviceConfig
 		)
 		_ = clientConn.Close()
 		return
+	}
+
+	if m.admission != nil {
+		releaseAdmission, ok := m.admission.TryAcquire(dev.ID)
+		if !ok {
+			m.log.Warn("Mode 1 rejected: session admission cap reached",
+				"device_id", dev.ID,
+				"client_ip", clientConn.RemoteAddr().String(),
+			)
+			RejectConn(clientConn)
+			return
+		}
+		defer releaseAdmission()
 	}
 
 	targetAddr := net.JoinHostPort(dev.Host, fmt.Sprintf("%d", dev.Port))
@@ -235,6 +280,9 @@ func (m *Mode1Manager) handleClient(clientConn net.Conn, dev config.DeviceConfig
 		sess.SetTargetRTT(dialRTT)
 		defer m.meter.UnregisterSession(sess.ID)
 	}
+
+	// The socket is now authenticated/admitted; release the pre-auth slot.
+	releaseHandshake()
 
 	m.log.Info("Mode 1 session established",
 		"session_id", func() string {

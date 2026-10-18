@@ -62,6 +62,14 @@ type ConnectionLimitsConfig struct {
 	MaxSessionKBps           int `yaml:"max_session_kbps"`
 	Mode2HandshakeTimeoutSec int `yaml:"mode2_handshake_timeout_sec"`
 	HalfCloseTimeoutSec      int `yaml:"half_close_timeout_sec"`
+
+	// Hard admission caps. These are deliberately configurable but bounded:
+	// sync.Pool reuses buffers, it does not cap concurrency. Raising these
+	// values invalidates the <35MB rated-load claim until re-measured.
+	MaxTotalSessions     int `yaml:"max_total_sessions"`
+	MaxSessionsPerDevice int `yaml:"max_sessions_per_device"`
+	MaxPendingHandshakes int `yaml:"max_pending_handshakes"`
+	MaxWSClients         int `yaml:"max_ws_clients"`
 }
 
 // LoggingConfig manages log file settings and in-memory ring buffer capacity.
@@ -157,6 +165,10 @@ func DefaultConfig() *Config {
 			MaxSessionKBps:           0,
 			Mode2HandshakeTimeoutSec: 5,
 			HalfCloseTimeoutSec:      5,
+			MaxTotalSessions:         32,
+			MaxSessionsPerDevice:     8,
+			MaxPendingHandshakes:     64,
+			MaxWSClients:             8,
 		},
 		Logging: LoggingConfig{
 			DiskLogging:         false,
@@ -311,6 +323,20 @@ func (c *Config) validateLocked() error {
 		c.ConnectionLimits.HalfCloseTimeoutSec = 5
 	}
 
+	var limitErr error
+	if c.ConnectionLimits.MaxTotalSessions, limitErr = boundedLimit("max_total_sessions", c.ConnectionLimits.MaxTotalSessions, 32, 256); limitErr != nil {
+		return limitErr
+	}
+	if c.ConnectionLimits.MaxSessionsPerDevice, limitErr = boundedLimit("max_sessions_per_device", c.ConnectionLimits.MaxSessionsPerDevice, 8, 64); limitErr != nil {
+		return limitErr
+	}
+	if c.ConnectionLimits.MaxPendingHandshakes, limitErr = boundedLimit("max_pending_handshakes", c.ConnectionLimits.MaxPendingHandshakes, 64, 512); limitErr != nil {
+		return limitErr
+	}
+	if c.ConnectionLimits.MaxWSClients, limitErr = boundedLimit("max_ws_clients", c.ConnectionLimits.MaxWSClients, 8, 64); limitErr != nil {
+		return limitErr
+	}
+
 	// Telemetry defaults
 	if c.Telemetry.BroadcastIntervalSec <= 0 {
 		c.Telemetry.BroadcastIntervalSec = 1
@@ -371,6 +397,21 @@ func (c *Config) validateLocked() error {
 	}
 
 	return nil
+}
+
+// boundedLimit applies a safe default and a hard safety ceiling to an
+// admission limit. Zero means "use the default", never "unlimited".
+func boundedLimit(name string, value, defaultValue, ceiling int) (int, error) {
+	if value < 0 {
+		return 0, fmt.Errorf("%s cannot be negative: %d", name, value)
+	}
+	if value == 0 {
+		return defaultValue, nil
+	}
+	if value > ceiling {
+		return 0, fmt.Errorf("%s %d exceeds safety ceiling %d", name, value, ceiling)
+	}
+	return value, nil
 }
 
 // IsIPAllowed checks if an incoming remote IP address is permitted under access control rules.
@@ -580,6 +621,12 @@ func (c *Config) ApplyReload(newCfg *Config) ([]string, error) {
 	if c.Telemetry.BroadcastIntervalSec != newCfg.Telemetry.BroadcastIntervalSec {
 		addWarning("telemetry.broadcast_interval_sec changed; full restart required")
 	}
+	if c.ConnectionLimits.MaxTotalSessions != newCfg.ConnectionLimits.MaxTotalSessions ||
+		c.ConnectionLimits.MaxSessionsPerDevice != newCfg.ConnectionLimits.MaxSessionsPerDevice ||
+		c.ConnectionLimits.MaxPendingHandshakes != newCfg.ConnectionLimits.MaxPendingHandshakes ||
+		c.ConnectionLimits.MaxWSClients != newCfg.ConnectionLimits.MaxWSClients {
+		addWarning("session admission caps changed; full restart required")
+	}
 
 	backupDevices := c.Devices
 	backupACL := c.AccessControl
@@ -702,4 +749,3 @@ func (c *Config) SaveTargets() error {
 	}
 	return SaveTargetsFile(path, devs)
 }
-

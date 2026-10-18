@@ -19,18 +19,24 @@ import (
 
 // APIHandler coordinates REST and WebSocket endpoints for WebUI management.
 type APIHandler struct {
-	cfg            *config.Config
-	configPath     string
-	meter          *proxy.TrafficMeter
-	pinger         *telemetry.Pinger
-	appLogger      *logger.Logger
-	auth           *AuthManager
-	wsHub          *WSHub
+	cfg              *config.Config
+	configPath       string
+	meter            *proxy.TrafficMeter
+	pinger           *telemetry.Pinger
+	appLogger        *logger.Logger
+	auth             *AuthManager
+	wsHub            *WSHub
 	startTime        time.Time
 	mode1Reloader    func([]config.DeviceConfig) error
 	bindErrorsGetter func() map[string]string
+	admission        *proxy.AdmissionController
 	version          string
 	limiter          *LoginRateLimiter
+}
+
+// SetAdmissionController attaches the shared session admission controller.
+func (a *APIHandler) SetAdmissionController(admission *proxy.AdmissionController) {
+	a.admission = admission
 }
 
 // NewAPIHandler initializes the API router and telemetry hub.
@@ -579,7 +585,7 @@ func (a *APIHandler) CollectMetrics() map[string]any {
 		activeSessionsCount = len(a.meter.GetSessions())
 	}
 
-	return map[string]any{
+	metrics := map[string]any{
 		"uptime_seconds":        int64(time.Since(a.startTime).Seconds()),
 		"memory_rss_bytes":      rssBytes,
 		"memory_rss_mb":         float64(rssBytes) / (1024 * 1024),
@@ -591,6 +597,20 @@ func (a *APIHandler) CollectMetrics() map[string]any {
 		"total_cumulative_tx":   traffic.TotalCumulativeTx,
 		"active_sessions_count": activeSessionsCount,
 	}
+
+	if a.wsHub != nil {
+		ws := a.wsHub.Stats()
+		metrics["ws_clients"] = ws.Clients
+		metrics["ws_max_clients"] = ws.MaxClients
+		metrics["ws_evictions"] = ws.Evicted
+		metrics["ws_origin_rejections"] = ws.OriginRejected
+		metrics["ws_version_rejections"] = ws.VersionRejected
+	}
+	if a.admission != nil {
+		metrics["admission"] = a.admission.Snapshot()
+	}
+
+	return metrics
 }
 
 // BuildTelemetryPayload creates the 1Hz JSON snapshot pushed to connected WebUI clients.

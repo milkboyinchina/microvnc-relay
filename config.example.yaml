@@ -128,6 +128,14 @@ connection_limits:
   # Optional per-session bandwidth cap in KB/s to prevent network choking (0 = unlimited)
   max_session_kbps: 0
 
+  # Hard admission caps. These bound memory and FDs; sync.Pool is reuse, not a
+  # cap. 0 means "use the default", never "unlimited". Raising these values
+  # invalidates the <35MB rated-load claim until re-measured.
+  max_total_sessions: 32          # all Mode 1 + Mode 2 sessions
+  max_sessions_per_device: 8      # one target cannot consume every slot
+  max_pending_handshakes: 64      # accepted-but-unauthenticated sockets
+  max_ws_clients: 8               # telemetry WebSocket clients (oldest evicted)
+
 # ==============================================================================
 # Logging & Storage (Flash Wear Protection)
 # ==============================================================================

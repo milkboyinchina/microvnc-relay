@@ -235,6 +235,42 @@ features:
 	}
 }
 
+func TestAdmissionLimitDefaultsAndCeilings(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ConnectionLimits.MaxTotalSessions = 0
+	cfg.ConnectionLimits.MaxSessionsPerDevice = 0
+	cfg.ConnectionLimits.MaxPendingHandshakes = 0
+	cfg.ConnectionLimits.MaxWSClients = 0
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate defaults: %v", err)
+	}
+	if cfg.ConnectionLimits.MaxTotalSessions != 32 ||
+		cfg.ConnectionLimits.MaxSessionsPerDevice != 8 ||
+		cfg.ConnectionLimits.MaxPendingHandshakes != 64 ||
+		cfg.ConnectionLimits.MaxWSClients != 8 {
+		t.Fatalf("unexpected admission defaults: %+v", cfg.ConnectionLimits)
+	}
+
+	for name, mutate := range map[string]func(*ConnectionLimitsConfig){
+		"max_total_sessions":      func(l *ConnectionLimitsConfig) { l.MaxTotalSessions = 257 },
+		"max_sessions_per_device": func(l *ConnectionLimitsConfig) { l.MaxSessionsPerDevice = 65 },
+		"max_pending_handshakes":  func(l *ConnectionLimitsConfig) { l.MaxPendingHandshakes = 513 },
+		"max_ws_clients":          func(l *ConnectionLimitsConfig) { l.MaxWSClients = 65 },
+	} {
+		bad := DefaultConfig()
+		mutate(&bad.ConnectionLimits)
+		if err := bad.Validate(); err == nil {
+			t.Errorf("expected %s above ceiling to be rejected", name)
+		}
+	}
+
+	negative := DefaultConfig()
+	negative.ConnectionLimits.MaxTotalSessions = -1
+	if err := negative.Validate(); err == nil {
+		t.Fatal("expected negative max_total_sessions to be rejected")
+	}
+}
+
 func TestApplyDeviceTransactionPersistsCandidate(t *testing.T) {
 	dir := t.TempDir()
 	cfg := DefaultConfig()

@@ -461,6 +461,72 @@ func TestMode1PortCollisionTracking(t *testing.T) {
 	}
 }
 
+func TestMode1AdmissionCapRejectsSecondSession(t *testing.T) {
+	targetPort, stopTarget := startMockRFBServer(t)
+	defer stopTarget()
+
+	virtualPort := getFreePort(t)
+	cfg := config.DefaultConfig()
+	cfg.Server.VNCBind = "127.0.0.1"
+	cfg.Features.Mode1Enabled = true
+	cfg.ConnectionLimits.MaxTotalSessions = 10
+	cfg.ConnectionLimits.MaxSessionsPerDevice = 1
+	cfg.Devices = []config.DeviceConfig{{
+		ID:          "capped-device",
+		Host:        "127.0.0.1",
+		Port:        targetPort,
+		VirtualPort: virtualPort,
+		Enabled:     true,
+	}}
+
+	meter := NewTrafficMeter(false)
+	admission := NewAdmissionController(cfg.ConnectionLimits)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	m1 := NewMode1Manager(cfg, meter, log)
+	m1.SetAdmissionController(admission)
+	if err := m1.Start(); err != nil {
+		t.Fatalf("Mode1Manager.Start: %v", err)
+	}
+	defer m1.Stop(context.Background())
+
+	addr := m1.ListenerAddr("capped-device")
+	if addr == "" {
+		t.Fatal("expected a bound Mode 1 listener")
+	}
+
+	first, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial first session: %v", err)
+	}
+	defer first.Close()
+
+	// The target greeting is forwarded only after the session is registered.
+	greeting := make([]byte, 12)
+	if _, err := io.ReadFull(first, greeting); err != nil {
+		t.Fatalf("read first session greeting: %v", err)
+	}
+
+	second, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial second session: %v", err)
+	}
+	defer second.Close()
+
+	_ = second.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var one [1]byte
+	if _, err := second.Read(one[:]); err == nil {
+		t.Fatal("expected the second session to be rejected by the per-device cap")
+	}
+
+	snap := admission.Snapshot()
+	if snap.RejectedPerDevice != 1 {
+		t.Fatalf("expected one per-device rejection, got %d", snap.RejectedPerDevice)
+	}
+	if snap.TotalSessions != 1 {
+		t.Fatalf("expected one active admission slot, got %d", snap.TotalSessions)
+	}
+}
+
 func TestForwardStreamHalfCloseDrainsOppositeDirection(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -542,4 +608,3 @@ func TestForwardStreamHalfCloseDrainsOppositeDirection(t *testing.T) {
 		t.Fatal("ForwardStream did not finish after both directions closed")
 	}
 }
-

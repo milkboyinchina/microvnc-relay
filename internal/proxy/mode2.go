@@ -45,11 +45,14 @@ type Mode2Manager struct {
 	mu         sync.Mutex
 	reverseLn  net.Listener
 	viewerLn   net.Listener
-	pending  map[int]*pendingServer
-	stopCh   chan struct{}
-	acceptWG sync.WaitGroup
-	connWG   sync.WaitGroup
-	stopped  bool
+	pending    map[int]*pendingServer
+	stopCh     chan struct{}
+	acceptWG   sync.WaitGroup
+	connWG     sync.WaitGroup
+	stopped    bool
+	admission  *AdmissionController
+	reverseSem *Semaphore
+	viewerSem  *Semaphore
 }
 
 // NewMode2Manager initializes a Mode 2 UltraVNC reverse ID matchmaker.
@@ -58,12 +61,20 @@ func NewMode2Manager(cfg *config.Config, meter *TrafficMeter, log *slog.Logger) 
 		log = slog.Default()
 	}
 	return &Mode2Manager{
-		cfg:     cfg,
-		meter:   meter,
-		log:     log,
-		pending: make(map[int]*pendingServer),
-		stopCh:  make(chan struct{}),
+		cfg:        cfg,
+		meter:      meter,
+		log:        log,
+		pending:    make(map[int]*pendingServer),
+		stopCh:     make(chan struct{}),
+		reverseSem: NewSemaphore(cfg.ConnectionLimits.MaxPendingHandshakes),
+		viewerSem:  NewSemaphore(cfg.ConnectionLimits.MaxPendingHandshakes),
 	}
+}
+
+// SetAdmissionController attaches the process-wide session admission controller.
+// It must be called before Start.
+func (m *Mode2Manager) SetAdmissionController(admission *AdmissionController) {
+	m.admission = admission
 }
 
 // Start opens the Mode 2 reverse server listener and viewer listener if Mode2Enabled is true.
@@ -171,6 +182,26 @@ func (m *Mode2Manager) handshakeTimeout() time.Duration {
 }
 
 func (m *Mode2Manager) handleReverseServer(serverConn net.Conn) {
+	handshakeHeld := false
+	if m.reverseSem != nil {
+		if !m.reverseSem.TryAcquire() {
+			if m.admission != nil {
+				m.admission.RecordHandshakeRejection()
+			}
+			m.log.Warn("Mode 2 reverse server rejected: pending handshake cap reached",
+				"server_ip", serverConn.RemoteAddr().String(),
+			)
+			RejectConn(serverConn)
+			return
+		}
+		handshakeHeld = true
+	}
+	defer func() {
+		if handshakeHeld {
+			m.reverseSem.Release()
+		}
+	}()
+
 	remoteIP := ExtractRemoteIP(serverConn.RemoteAddr())
 	if !m.cfg.IsIPAllowed(remoteIP) {
 		m.log.Warn("rejected Mode 2 reverse server outside CIDR allowlist",
@@ -244,6 +275,28 @@ func (m *Mode2Manager) handleReverseServer(serverConn net.Conn) {
 }
 
 func (m *Mode2Manager) handleViewer(viewerConn net.Conn) {
+	handshakeHeld := false
+	if m.viewerSem != nil {
+		if !m.viewerSem.TryAcquire() {
+			if m.admission != nil {
+				m.admission.RecordHandshakeRejection()
+			}
+			m.log.Warn("Mode 2 viewer rejected: pending handshake cap reached",
+				"viewer_ip", viewerConn.RemoteAddr().String(),
+			)
+			RejectConn(viewerConn)
+			return
+		}
+		handshakeHeld = true
+	}
+	releaseHandshake := func() {
+		if handshakeHeld {
+			m.viewerSem.Release()
+			handshakeHeld = false
+		}
+	}
+	defer releaseHandshake()
+
 	remoteIP := ExtractRemoteIP(viewerConn.RemoteAddr())
 	if !m.cfg.IsIPAllowed(remoteIP) {
 		m.log.Warn("rejected Mode 2 viewer outside CIDR allowlist",
@@ -319,6 +372,24 @@ func (m *Mode2Manager) handleViewer(viewerConn net.Conn) {
 	if found {
 		deviceID = dev.ID
 		deviceName = dev.Name
+	}
+
+	// The handshake is complete; release the pre-auth slot before admitting the
+	// actual session.
+	releaseHandshake()
+
+	if m.admission != nil {
+		releaseAdmission, ok := m.admission.TryAcquire(deviceID)
+		if !ok {
+			m.log.Warn("Mode 2 rejected: session admission cap reached",
+				"mode2_id", mode2ID,
+				"device_id", deviceID,
+			)
+			RejectConn(viewerConn)
+			_ = serverConn.Close()
+			return
+		}
+		defer releaseAdmission()
 	}
 
 	closeBoth := func() {

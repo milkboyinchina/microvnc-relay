@@ -86,6 +86,7 @@ func main() {
 
 	// Initialize traffic meter and 24h ring buffer
 	meter := proxy.NewTrafficMeter(cfg.Features.BandwidthMeteringEnabled)
+	admission := proxy.NewAdmissionController(cfg.ConnectionLimits)
 	stopMeter := make(chan struct{})
 	if cfg.Features.BandwidthMeteringEnabled {
 		go func() {
@@ -104,12 +105,14 @@ func main() {
 
 	// Start Mode 1 Port-Mapped Proxy Engine
 	mode1Mgr := proxy.NewMode1Manager(cfg, meter, slog.Default())
+	mode1Mgr.SetAdmissionController(admission)
 	if err := mode1Mgr.Start(); err != nil {
 		slog.Warn("[PORT COLLISION] One or more Mode 1 listeners failed to bind at startup", "error", err)
 	}
 
 	// Start Mode 2 UltraVNC ID Reverse Matchmaker
 	mode2Mgr := proxy.NewMode2Manager(cfg, meter, slog.Default())
+	mode2Mgr.SetAdmissionController(admission)
 	if err := mode2Mgr.Start(); err != nil {
 		slog.Error("[PORT COLLISION] Failed to start Mode 2 repeater listeners", "error", err)
 		stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -149,6 +152,7 @@ func main() {
 		os.Exit(1)
 	}
 	webServer.SetBindErrorsGetter(mode1Mgr.GetBindErrors)
+	webServer.SetAdmissionController(admission)
 
 	if err := webServer.Start(); err != nil {
 		slog.Error("[PORT COLLISION] Failed to start WebUI server listener", "error", err)

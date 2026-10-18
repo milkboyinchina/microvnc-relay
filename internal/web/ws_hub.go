@@ -10,73 +10,163 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-const wsMagicGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+const (
+	wsMagicGUID          = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+	defaultMaxWSClients  = 8
+	maxWSFrameBytes      = 4 * 1024
+	wsWriteTimeout       = 2 * time.Second
+	wsCloseTryAgainLater = 1013
+)
 
 type wsClient struct {
-	conn net.Conn
-	bufr *bufio.Reader
-	bufw *bufio.Writer
-	mu   sync.Mutex
+	conn      net.Conn
+	bufr      *bufio.Reader
+	bufw      *bufio.Writer
+	mu        sync.Mutex
+	createdAt time.Time
 }
 
-func (c *wsClient) writeTextFrame(payload []byte) error {
+// WSStats is a point-in-time snapshot of the telemetry WebSocket hub.
+type WSStats struct {
+	Clients         int    `json:"clients"`
+	MaxClients      int    `json:"max_clients"`
+	Evicted         uint64 `json:"evicted"`
+	OriginRejected  uint64 `json:"origin_rejected"`
+	VersionRejected uint64 `json:"version_rejected"`
+}
+
+func (c *wsClient) writeFrame(opcode byte, payload []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	_ = c.conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+	if c.conn == nil {
+		return net.ErrClosed
+	}
+
+	_ = c.conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 	defer func() {
 		_ = c.conn.SetWriteDeadline(time.Time{})
 	}()
 
+	header := make([]byte, 0, 10)
+	header = append(header, 0x80|opcode)
+
 	length := len(payload)
-	var header [10]byte
-	header[0] = 0x81 // FIN = 1, Opcode = 1 (Text)
-	headerLen := 2
-
-	if length <= 125 {
-		header[1] = byte(length)
-	} else if length <= 65535 {
-		header[1] = 126
-		binary.BigEndian.PutUint16(header[2:4], uint16(length))
-		headerLen = 4
-	} else {
-		header[1] = 127
-		binary.BigEndian.PutUint64(header[2:10], uint64(length))
-		headerLen = 10
+	switch {
+	case length <= 125:
+		header = append(header, byte(length))
+	case length <= 65535:
+		header = append(header, 126, byte(length>>8), byte(length))
+	default:
+		header = append(header, 127)
+		var ext [8]byte
+		binary.BigEndian.PutUint64(ext[:], uint64(length))
+		header = append(header, ext[:]...)
 	}
 
-	if _, err := c.bufw.Write(header[:headerLen]); err != nil {
+	if _, err := c.bufw.Write(header); err != nil {
 		return err
 	}
-	if _, err := c.bufw.Write(payload); err != nil {
-		return err
+	if length > 0 {
+		if _, err := c.bufw.Write(payload); err != nil {
+			return err
+		}
 	}
 	return c.bufw.Flush()
 }
 
-// WSHub coordinates pure Go RFC 6455 WebSocket clients for real-time telemetry streaming.
+func (c *wsClient) writeTextFrame(payload []byte) error {
+	return c.writeFrame(0x1, payload)
+}
+
+func (c *wsClient) writeCloseFrame(code uint16, reason string) error {
+	if len(reason) > 123 {
+		reason = reason[:123]
+	}
+	payload := make([]byte, 2+len(reason))
+	binary.BigEndian.PutUint16(payload[:2], code)
+	copy(payload[2:], reason)
+	return c.writeFrame(0x8, payload)
+}
+
+func (c *wsClient) writePongFrame(payload []byte) error {
+	return c.writeFrame(0xA, payload)
+}
+
+// WSHub coordinates pure Go RFC 6455 WebSocket clients for real-time telemetry
+// streaming. The client count is strictly bounded; when full, the oldest
+// client is evicted with a 1013 close frame.
 type WSHub struct {
 	mu      sync.RWMutex
 	clients map[*wsClient]struct{}
 	closed  bool
+
+	maxClients int
+
+	evicted         atomic.Uint64
+	originRejected  atomic.Uint64
+	versionRejected atomic.Uint64
 }
 
 // NewWSHub initializes the WebSocket broadcast hub.
 func NewWSHub() *WSHub {
 	return &WSHub{
-		clients: make(map[*wsClient]struct{}),
+		clients:    make(map[*wsClient]struct{}),
+		maxClients: defaultMaxWSClients,
 	}
 }
 
-// HandleUpgrade upgrades an incoming HTTP request to an RFC 6455 WebSocket connection.
+// SetMaxClients changes the hard client cap. Values <= 0 restore the default.
+func (h *WSHub) SetMaxClients(n int) {
+	if n <= 0 {
+		n = defaultMaxWSClients
+	}
+	h.mu.Lock()
+	h.maxClients = n
+	h.mu.Unlock()
+}
+
+// Stats returns a snapshot of client count and rejection/eviction counters.
+func (h *WSHub) Stats() WSStats {
+	h.mu.RLock()
+	clients := len(h.clients)
+	maxClients := h.maxClients
+	h.mu.RUnlock()
+
+	return WSStats{
+		Clients:         clients,
+		MaxClients:      maxClients,
+		Evicted:         h.evicted.Load(),
+		OriginRejected:  h.originRejected.Load(),
+		VersionRejected: h.versionRejected.Load(),
+	}
+}
+
+// HandleUpgrade upgrades an incoming HTTP request to an RFC 6455 WebSocket
+// connection. Cross-origin requests are rejected before hijacking.
 func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) error {
 	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		return errors.New("missing or invalid Upgrade header")
+	}
+	if strings.TrimSpace(r.Header.Get("Sec-WebSocket-Version")) != "13" {
+		h.versionRejected.Add(1)
+		http.Error(w, "unsupported websocket version", http.StatusUpgradeRequired)
+		return errors.New("missing or unsupported Sec-WebSocket-Version")
+	}
+	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || !strings.EqualFold(u.Host, r.Host) {
+			h.originRejected.Add(1)
+			http.Error(w, "cross-origin websocket rejected", http.StatusForbidden)
+			return errors.New("cross-origin websocket rejected")
+		}
 	}
 
 	key := strings.TrimSpace(r.Header.Get("Sec-WebSocket-Key"))
@@ -88,13 +178,11 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) error {
 	if !ok {
 		return errors.New("server does not support hijacking")
 	}
-
 	conn, rw, err := hj.Hijack()
 	if err != nil {
 		return fmt.Errorf("hijack error: %w", err)
 	}
 
-	// Compute Sec-WebSocket-Accept = Base64(SHA-1(Key + GUID))
 	hash := sha1.New()
 	hash.Write([]byte(key + wsMagicGUID))
 	acceptKey := base64.StdEncoding.EncodeToString(hash.Sum(nil))
@@ -106,7 +194,6 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) error {
 			"Sec-WebSocket-Accept: %s\r\n\r\n",
 		acceptKey,
 	)
-
 	if _, err := rw.WriteString(response); err != nil {
 		_ = conn.Close()
 		return err
@@ -117,23 +204,39 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	client := &wsClient{
-		conn: conn,
-		bufr: rw.Reader,
-		bufw: rw.Writer,
+		conn:      conn,
+		bufr:      rw.Reader,
+		bufw:      rw.Writer,
+		createdAt: time.Now(),
 	}
 
+	var evicted *wsClient
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
 		_ = conn.Close()
 		return errors.New("hub is closed")
 	}
+	if h.maxClients > 0 && len(h.clients) >= h.maxClients {
+		for existing := range h.clients {
+			if evicted == nil || existing.createdAt.Before(evicted.createdAt) {
+				evicted = existing
+			}
+		}
+		if evicted != nil {
+			delete(h.clients, evicted)
+			h.evicted.Add(1)
+		}
+	}
 	h.clients[client] = struct{}{}
 	h.mu.Unlock()
 
-	// Drain incoming client frames (ping/pong/close) in background
-	go h.readPump(client)
+	if evicted != nil {
+		_ = evicted.writeCloseFrame(wsCloseTryAgainLater, "try again later")
+		_ = evicted.conn.Close()
+	}
 
+	go h.readPump(client)
 	return nil
 }
 
@@ -143,15 +246,70 @@ func (h *WSHub) readPump(c *wsClient) {
 		_ = c.conn.Close()
 	}()
 
-	// Discard any incoming frames or detect close
-	buf := make([]byte, 512)
 	for {
-		_, err := c.bufr.Read(buf)
-		if err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		var header [2]byte
+		if _, err := io.ReadFull(c.bufr, header[:]); err != nil {
+			return
+		}
+
+		opcode := header[0] & 0x0f
+		masked := header[1]&0x80 != 0
+		length := int64(header[1] & 0x7f)
+
+		switch length {
+		case 126:
+			var ext [2]byte
+			if _, err := io.ReadFull(c.bufr, ext[:]); err != nil {
 				return
 			}
+			length = int64(binary.BigEndian.Uint16(ext[:]))
+		case 127:
+			var ext [8]byte
+			if _, err := io.ReadFull(c.bufr, ext[:]); err != nil {
+				return
+			}
+			raw := binary.BigEndian.Uint64(ext[:])
+			if raw > maxWSFrameBytes {
+				_ = c.writeCloseFrame(1009, "frame too large")
+				return
+			}
+			length = int64(raw)
+		}
+
+		if length < 0 || length > maxWSFrameBytes {
+			_ = c.writeCloseFrame(1009, "frame too large")
 			return
+		}
+
+		var mask [4]byte
+		if masked {
+			if _, err := io.ReadFull(c.bufr, mask[:]); err != nil {
+				return
+			}
+		}
+
+		payload := make([]byte, length)
+		if length > 0 {
+			if _, err := io.ReadFull(c.bufr, payload); err != nil {
+				return
+			}
+		}
+		if masked {
+			for i := range payload {
+				payload[i] ^= mask[i%4]
+			}
+		}
+
+		switch opcode {
+		case 0x8: // close
+			_ = c.writeCloseFrame(1000, "")
+			return
+		case 0x9: // ping
+			_ = c.writePongFrame(payload)
+		case 0xA: // pong: ignore
+		case 0x1, 0x2: // telemetry clients send no data; discard
+		default:
+			// Ignore unknown opcodes.
 		}
 	}
 }
@@ -199,6 +357,7 @@ func (h *WSHub) Close() {
 	h.mu.Unlock()
 
 	for _, c := range clients {
+		_ = c.writeCloseFrame(1001, "server shutting down")
 		_ = c.conn.Close()
 	}
 }
