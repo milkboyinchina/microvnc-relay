@@ -65,10 +65,10 @@ The project is organized into **4 incremental phases plus a Gate 0 hardening pas
     - [ ] `CloseWrite` half-close handling with a bounded wait on the other direction.
     - [ ] Authoritative active-session registry: stop admitting during shutdown, close all active sockets, wait only a bounded grace period, report sessions still pending.
   - [ ] **Admission Control (all modes)**: global + per-target session caps, accepted-but-unauthenticated socket cap, WebSocket client cap (8, oldest-eviction) — defined behavior and explicit overload state at each limit. (`sync.Pool` is allocation reuse, not a memory cap — 500 streams × 64KiB ≈ 31MB of buffers alone.)
-  - [ ] **Metered Zero-Copy Path (`internal/proxy/proxy_linux.go` + `proxy_other.go`)**:
-    - [ ] Meter byte counts via `syscall.Splice` return values (kernel-side) instead of forcing userspace copies, or implement `ReadFrom`/`WriterTo` delegation on `MeteredConn` — wrapping in `MeteredConn` currently disables the `splice(2)` fast path entirely.
-    - [ ] Shrink kernel pipe buffers via `F_SETPIPE_SZ=16KB` on constrained boards (−75% kernel slab per stream).
-    - [ ] Document the trade-off: token-bucket QoS pacing inherently forces the copy path; metering and zero-copy are mutually exclusive per stream.
+  - [x] **Metered Zero-Copy Path (`internal/proxy/proxy_linux.go` + `proxy_other.go`)**:
+    - [x] Meter byte counts via `splice(2)` return values (kernel-side) without a userspace copy.
+    - [x] Shrink kernel pipe buffers via `F_SETPIPE_SZ=16KB` on constrained boards (−75% kernel slab per stream).
+    - [x] Document the trade-off: token-bucket QoS pacing inherently forces the userspace copy/pacing path; it is the only remaining non-splice mode.
   - [ ] **32-bit ARM Safety (`internal/`)**: typed `atomic.Uint64` counters (auto-aligned — misaligned `atomic.AddUint64` panics on `GOARCH=arm`); `GOARCH=arm` build + test in CI.
   - [ ] **Probe Hygiene (`internal/telemetry/pinger.go`)**: `SO_LINGER 0` on probe sockets (TIME_WAIT accumulation); jittered per-host probe cadence (x11vnc/RealVNC rate-limit high-churn sources — the prober can get the relay banned).
   - [ ] **Installer Sysctls (`scripts/install-systemd.sh`)**: apply `net.ipv4.tcp_mtu_probing=1`; machine-id regeneration step for cloned SD images.
@@ -167,7 +167,7 @@ The project is organized into **4 incremental phases plus a Gate 0 hardening pas
 
 ### Primary Language: **Go (Golang)**
 - **Cross-Compilation**: Native `GOOS=linux GOARCH=arm GOARM=6/7 CGO_ENABLED=0` builds static binaries with zero `glibc` dependencies.
-- **Kernel Zero-Copy (with documented trade-off)**: Go's `io.Copy` automatically invokes Linux `splice(2)` for unmetered TCP-to-TCP streams, while metered streams use a zero-allocation `sync.Pool` of 32 KB buffers. **Caveat (audit)**: the `splice(2)` fast path requires bare `*net.TCPConn` at both ends — wrapping in `MeteredConn` disables it, so metered/QoS streams are userspace-copied by design. Gate 0 restores kernel-side byte counting via `syscall.Splice` return values; token-bucket QoS pacing inherently requires the copy path. `sync.Pool` is allocation *reuse*, not admission control — concurrency is bounded by the Gate 0 admission caps.
+- **Kernel Zero-Copy (with documented trade-off)**: The Gate 0 forwarding path uses Linux `splice(2)` with per-direction 16KB pipes and meters bytes from the syscall return values, so live 1Hz telemetry works without userspace copies. `max_session_kbps` (QoS pacing) is the only mode that intentionally uses the userspace pooled-buffer path. Non-Linux, non-TCP, or splice-setup failures fall back to `io.Copy`/the pooled path. `sync.Pool` is allocation *reuse*, not admission control — concurrency is bounded by the admission caps.
 - **Single Executable**: WebUI assets are compiled directly into the binary via `//go:embed`.
 - **Memory Ceiling (testable contract, audit-aligned)**: **< 35MB process RSS at rated load** (≤32 concurrent streams, ≤8 WebSocket clients) **plus a documented kernel-memory envelope** (`F_SETPIPE_SZ`-shrunk 16KB/pipe splice buffers + socket buffers), re-measured under netem stress on physical Pi 2 and Pi 1/Zero at each phase gate. Enforced by the chain: `GOMEMLIMIT=24MiB` (a soft Go-heap ceiling — worst-case RSS ≈ non-heap base of ~8–10MB binary text/stacks + limit; the previous 48MiB allowed ~13MB of overshoot) + `GOGC=50` + systemd `MemoryHigh=32M` (throttle) + `MemoryMax=48M` (hard backstop — verify the memory cgroup is enabled on Pi OS, as some images default to `cgroup_disable=memory`, making both limits inert). RSS, `runtime.MemStats`, and cgroup memory are three different measures — never claim one using another.
 

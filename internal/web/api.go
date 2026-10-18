@@ -610,6 +610,10 @@ func (a *APIHandler) CollectMetrics() map[string]any {
 		metrics["admission"] = a.admission.Snapshot()
 	}
 
+	spliceDirections, spliceFallbacks := proxy.SpliceStats()
+	metrics["splice_directions_total"] = spliceDirections
+	metrics["splice_fallbacks_total"] = spliceFallbacks
+
 	return metrics
 }
 

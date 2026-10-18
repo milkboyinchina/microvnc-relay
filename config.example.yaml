@@ -130,6 +130,8 @@ connection_limits:
   half_close_timeout_sec: 5
 
   # Optional per-session bandwidth cap in KB/s to prevent network choking (0 = unlimited)
+  # NOTE: enabling QoS forces the userspace pacing path for that stream; the
+  # kernel splice(2) fast path is not used while a bandwidth cap is active.
   max_session_kbps: 0
 
   # Hard admission caps. These bound memory and FDs; sync.Pool is reuse, not a

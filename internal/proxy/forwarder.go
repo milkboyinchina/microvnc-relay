@@ -164,9 +164,27 @@ func copyDirection(
 	limits config.ConnectionLimitsConfig,
 	meteringEnabled bool,
 ) (int64, error) {
-	// Zero-copy fast path: when byte metering, idle deadlines, and QoS caps are
-	// disabled (e.g. Headless Pure Relay profile), io.Copy invokes Linux kernel
-	// splice(2) directly.
+	// Kernel splice path: metering is derived from splice return values, so
+	// live counters no longer force a userspace copy. QoS pacing still requires
+	// the userspace path below.
+	if limits.MaxSessionKBps <= 0 {
+		if dstTCP, ok := dst.(*net.TCPConn); ok {
+			if srcTCP, ok := src.(*net.TCPConn); ok {
+				handled, total, err := spliceMetered(
+					dstTCP,
+					srcTCP,
+					addBytes,
+					time.Duration(limits.IdleTimeoutSec)*time.Second,
+				)
+				if handled {
+					return total, err
+				}
+			}
+		}
+	}
+
+	// Userspace fallback: io.Copy may itself use splice(2) for unmetered TCP
+	// pairs; metered/QoS/idle streams use the pooled buffer path.
 	if (!meteringEnabled || addBytes == nil) && limits.MaxSessionKBps <= 0 && limits.IdleTimeoutSec <= 0 {
 		return io.Copy(dst, src)
 	}
