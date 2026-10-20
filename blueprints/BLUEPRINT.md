@@ -12,7 +12,9 @@
 ### Target Hardware & Resource Envelope
 - **Tier 1 (Primary Edge Target)**: Raspberry Pi 1 / Pi Zero (`armv6l` / `armhf`, `GOARM=6`), Raspberry Pi 2 (`armv7l`, `GOARM=7`), Orange Pi Zero LTS, 32-bit Armbian TV boxes.
 - **Tier 2 (Secondary Target)**: ARM64 (Raspberry Pi 3/4/5, Armbian Rockchip/Allwinner), x86-64 Linux, and Windows x64.
-- **RAM Constraint**: Strictly **< 256MB system limit** (Process RSS budget: **< 35MB at rated load** — ≤32 concurrent streams, ≤8 WebSocket clients — plus a documented kernel-memory envelope: `F_SETPIPE_SZ`-shrunk 16KB/pipe splice buffers + socket buffers; empirically measured at **~8.97 MB** across 10 concurrent streams on Raspberry Pi 2; re-measured under netem stress on physical Pi 2 and Pi 1/Zero at each phase gate).
+- **RAM Constraint**: Strictly **< 256MB system limit** (Process RSS budget: **< 35MB at rated load** — ≤32 concurrent streams, ≤8 WebSocket clients — plus a documented kernel-memory envelope: `F_SETPIPE_SZ`-shrunk 16KB/pipe splice buffers + socket buffers; empirically measured at **~8.97 MB** across 10 concurrent streams on Raspberry Pi 2.
+  - **Gate 0 (Pi 2)**: 24h soak — 2,920 stages, max RSS **10,084 KB**, 0 heartbeat failures, no circuit breaker. Rated-load (32 streams × 64 KB) — max RSS **8,092 KB**, FDs 10, well under 35 MB. Systemd unit active: MemoryHigh=32M/MemoryMax=48M, but memory cgroup is **not mounted** on this Pi OS image (limits inert).
+  - **Gate 0 (Pi 1/Zero ARMv6)**: **deferred** — pending hardware provisioning. Cross-compile (`GOARM=6`) verified in CI; physical soak not yet run.)
 - **Storage Protection**: **Zero data caching**. MicroSD and eMMC flash writes are avoided; logs and telemetry remain in fixed-size RAM ring buffers unless explicitly enabled.
 
 ---
@@ -72,9 +74,16 @@ The project is organized into **4 incremental phases plus a Gate 0 hardening pas
   - [x] **32-bit ARM Safety (`internal/`)**: typed `atomic.Uint64` counters (auto-aligned — misaligned `atomic.AddUint64` panics on `GOARCH=arm`); `GOARCH=arm` build + test in CI.
   - [x] **Probe Hygiene (`internal/telemetry/pinger.go`)**: `SO_LINGER 0` on probe sockets (TIME_WAIT accumulation); jittered per-host probe cadence (x11vnc/RealVNC rate-limit high-churn sources — the prober can get the relay banned).
   - [x] **Installer Sysctls (`scripts/install-systemd.sh`)**: apply `net.ipv4.tcp_mtu_probing=1`; machine-id regeneration step for cloned SD images.
-  - [x] **CI Forward-Pull (was Phase 4)**: per-commit `GOARM=6`/`GOARM=7` cross-compile checks, `-race` on amd64/arm64, `govulncheck`, `goleak`, YAML/import parser fuzzing; physical ARMv6 soak as a Gate 0 exit test.
+  - [x] **CI Forward-Pull (was Phase 4)**: per-commit `GOARM=6`/`GOARM=7` cross-compile checks, `-race` on amd64/arm64, `govulncheck`, `goleak`, YAML/import parser fuzzing.
+  - Physical ARMv6 soak: **deferred** — pending hardware (Pi 1/Zero not provisioned). Cross-compile verified; soak not run.
   - [x] **Docker Daisy-Chain Test Harness (dev-only — audit)**: `docker compose` multi-hop topology (Hub ➔ Site DMZ ➔ Floor Pi relays + synthetic VNC targets) using **dev-tagged** builds (synthetic targets + fault injection exist only under `//go:build dev` — production images never ship them). Each container binds the real per-hop ports (`:5910`/`:8080`) in its own netns — port parity with the physical fleet. Data-plane scenarios shipped in Gate 0: direct, multi-hop `A ➔ B ➔ C`, `A ➔ B ➔ A` loops, abrupt disconnect, RST vs drop, and `tc netem` on the Site DMZ interface. Chain-control-plane scenarios (chain drift, duplicate `relay_id`, identity persistence across recreate, version skew/`api_version`, SSRF/inspect boundary) land with Phase 2a/b/c because those features do not exist yet. Container-to-container bridge traffic preserves real source IPs (published-port tests hit the Docker userland-proxy RST caveat). Runs on amd64 CI as an integration tier — **not** a resource-envelope test (physical ARMv6 soak remains mandatory). Production containerization (multi-arch release image, `uvnc:uvnc`, read-only rootfs, NetBird sidecar) stays in Phase 4.
 - **Gate 0 Exit Condition**: no unbounded control paths; reliable persistence & activation; tested failure recovery; the working tree committed & pushed so the spec, the published repo, and future audits agree.
+
+> **Hardware verification backlog (Gate 0, deferred)**:
+> - **Pi 1/Zero (ARMv6)** soak: deferred pending hardware provisioning. Cross-compile verified; physical soak not run.
+> - **Systemd sandbox**: tested on Pi 2 (unit active, MemoryHigh=32M/MemoryMax=48M, but memory cgroup **not mounted** on this Pi OS image — limits inert; FDs 10, RSS 7,808 KB). Not tested on a non-Pi systemd host.
+> - **Rated-load RSS**: measured on Pi 2 — 32 streams × 64 KB, max RSS 8,092 KB, well under 35 MB. Not yet measured on Pi 1/Zero.
+> - **Memory cgroup**: not available on this Pi OS image; GOMEMLIMIT=24MiB and GOGC=50 remain the primary RSS controls.
 
 ---
 
@@ -329,7 +338,7 @@ chain:                             # Phase 2a — chain API listener & trust mod
 
 ### Memory Footprint Profiles (Raspberry Pi 2 `armv7l`)
 
-> **Measurement honesty (audit)**: the **Full Stack** row is measured on physical Pi 2; the **Dashboard Only** row is an estimate pending re-measurement (its load range overlapping Full Stack was flagged as inconsistent). No ARMv6 (Pi 1/Zero) measurements exist yet — the Gate 0 physical ARMv6 soak closes this gap. The 35MB contract is defined at rated load with a documented kernel-memory envelope (§3), not as an idle-state claim.
+> **Measurement honesty (audit)**: the **Full Stack** row is measured on physical Pi 2 (24h soak: max RSS 10,084 KB; rated-load 32 streams: max RSS 8,092 KB). The **Dashboard Only** row is an estimate pending re-measurement (its load range overlapping Full Stack was flagged as inconsistent). ARMv6 (Pi 1/Zero) measurements are **deferred** — pending hardware. The 35MB contract is defined at rated load with a documented kernel-memory envelope (§3), not as an idle-state claim.
 
 | Operational Profile | Active Features | Idle RAM (RSS) | Active Load (2–10 Streams) | Use Case |
 |---|---|---|---|---|

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Gate 0 — Phase 1 Audit Hardening
 
-> Physical Raspberry Pi 2 / Pi 1-Zero soak and the first remote CI run remain exit checks. The code-level, race, cross-build, and Docker data-plane evidence is in this tree.
+> **Gate 0 (Pi 2) complete**: 24h soak passed (2,920 stages, max RSS 10,084 KB, 0 heartbeat failures, no circuit breaker). Rated-load RSS (32 streams) measured at 8,092 KB. Systemd unit tested (active, MemoryHigh=32M/MemoryMax=48M; memory cgroup not mounted on this Pi OS image — limits inert). Pi 1/Zero (ARMv6) soak deferred pending hardware. The code-level, race, cross-build, and Docker data-plane evidence is in this tree.
 
 #### Security
 - Token-only first-run setup: a one-time token is printed to stdout/journal; `auth.json` is created with `O_EXCL` and setup is hard-disabled once it exists. No default credentials.
