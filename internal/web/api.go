@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -18,16 +19,24 @@ import (
 
 // APIHandler coordinates REST and WebSocket endpoints for WebUI management.
 type APIHandler struct {
-	cfg            *config.Config
-	configPath     string
-	meter          *proxy.TrafficMeter
-	pinger         *telemetry.Pinger
-	appLogger      *logger.Logger
-	auth           *AuthManager
-	wsHub          *WSHub
-	startTime      time.Time
-	mode1Reloader  func([]config.DeviceConfig) error
-	version        string
+	cfg              *config.Config
+	configPath       string
+	meter            *proxy.TrafficMeter
+	pinger           *telemetry.Pinger
+	appLogger        *logger.Logger
+	auth             *AuthManager
+	wsHub            *WSHub
+	startTime        time.Time
+	mode1Reloader    func([]config.DeviceConfig) error
+	bindErrorsGetter func() map[string]string
+	admission        *proxy.AdmissionController
+	version          string
+	limiter          *LoginRateLimiter
+}
+
+// SetAdmissionController attaches the shared session admission controller.
+func (a *APIHandler) SetAdmissionController(admission *proxy.AdmissionController) {
+	a.admission = admission
 }
 
 // NewAPIHandler initializes the API router and telemetry hub.
@@ -53,6 +62,7 @@ func NewAPIHandler(
 		startTime:     time.Now(),
 		mode1Reloader: mode1Reloader,
 		version:       version,
+		limiter:       NewLoginRateLimiter(),
 	}
 }
 
@@ -79,6 +89,11 @@ func (a *APIHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("/api/v1/ws/telemetry", wrap(a.handleTelemetryWS))
 }
 
+const (
+	maxAuthBodyBytes   = 64 << 10
+	maxDeviceBodyBytes = 1 << 20
+)
+
 func (a *APIHandler) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -92,6 +107,7 @@ func (a *APIHandler) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		"auth_enabled":   a.cfg.Security.AuthEnabled,
 		"authenticated":  authenticated,
 		"setup_required": a.auth.SetupRequired(),
+		"auth_broken":    a.auth.AuthBroken(),
 		"version":        a.version,
 	})
 }
@@ -102,26 +118,77 @@ func (a *APIHandler) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if a.auth.AuthBroken() {
+		writeError(w, http.StatusForbidden, "auth.json exists but is invalid; delete it and restart to reset credentials")
+		return
+	}
 	if !a.auth.SetupRequired() {
-		writeError(w, http.StatusBadRequest, "Administrator credentials have already been configured")
+		writeError(w, http.StatusForbidden, "Administrator credentials have already been configured")
+		return
+	}
+
+	clientIP := ExtractClientIP(r)
+	if locked, remaining, delay := a.limiter.Check(clientIP); locked {
+		retryAfter := int(remaining.Seconds()) + 1
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error":               "Too many failed setup attempts. Try again later.",
+			"retry_after_seconds": retryAfter,
+		})
+		return
+	} else if delay > 0 {
+		retryAfter := int(delay.Seconds()) + 1
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error":               "Too many failed setup attempts. Try again shortly.",
+			"retry_after_seconds": retryAfter,
+		})
 		return
 	}
 
 	var req struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
+		Username   string `json:"username"`
+		Password   string `json:"password"`
+		SetupToken string `json:"setup_token"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxAuthBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid JSON payload")
 		return
 	}
+	if req.SetupToken == "" {
+		req.SetupToken = strings.TrimSpace(r.Header.Get("X-Setup-Token"))
+	}
 
-	if err := a.auth.SetAdminCredentials(req.Username, req.Password); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if err := a.auth.SetAdminCredentials(req.Username, req.Password, req.SetupToken); err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidSetupToken):
+			a.limiter.RecordFailure(clientIP)
+			writeError(w, http.StatusForbidden, "Invalid or expired setup token")
+		case errors.Is(err, ErrAlreadyConfigured):
+			writeError(w, http.StatusForbidden, "Administrator credentials have already been configured")
+		case errors.Is(err, ErrBcryptBusy):
+			w.Header().Set("Retry-After", "2")
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"error":               "Credential hashing is busy. Retry shortly.",
+				"retry_after_seconds": 2,
+			})
+		case strings.Contains(err.Error(), "username"), strings.Contains(err.Error(), "password"):
+			writeError(w, http.StatusBadRequest, err.Error())
+		default:
+			slog.Error("failed to complete first-run setup", "err", err)
+			writeError(w, http.StatusInternalServerError, "Failed to persist administrator credentials")
+		}
 		return
 	}
 
-	token := a.auth.CreateSession(req.Username)
+	a.limiter.RecordSuccess(clientIP)
+	token, err := a.auth.CreateSession(req.Username)
+	if err != nil {
+		slog.Error("credentials saved but session creation failed", "err", err)
+		writeError(w, http.StatusInternalServerError, "Credentials saved, but session creation failed; please log in")
+		return
+	}
 	a.auth.SetSessionCookie(w, token)
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -133,27 +200,84 @@ func (a *APIHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	clientIP := ExtractClientIP(r)
+
+	// Check if this IP is currently locked out or subject to progressive delay.
+	locked, remaining, delay := a.limiter.Check(clientIP)
+	if locked {
+		retryAfter := int(remaining.Seconds()) + 1
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error":               "Too many failed login attempts. Account temporarily locked for security.",
+			"retry_after_seconds": retryAfter,
+		})
+		return
+	}
+
+	// Progressive-delay gate: reject immediately with 429 instead of sleeping.
+	// A sleeping handler pins a goroutine and socket per attempt — a
+	// self-inflicted slowloris on a single-core Pi (audit C12 / Gate 0).
+	if delay > 0 {
+		retryAfter := int(delay.Seconds()) + 1
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error":               "Too many failed login attempts. Please retry shortly.",
+			"retry_after_seconds": retryAfter,
+		})
+		return
+	}
+
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxAuthBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid JSON payload")
 		return
 	}
 
-	if !a.auth.VerifyCredentials(req.Username, req.Password) {
+	ok, err := a.auth.VerifyCredentials(req.Username, req.Password)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrBcryptBusy):
+			w.Header().Set("Retry-After", "2")
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"error":               "Credential verification is busy. Retry shortly.",
+				"retry_after_seconds": 2,
+			})
+		case errors.Is(err, ErrAuthFileBroken):
+			writeError(w, http.StatusServiceUnavailable, "auth.json is invalid; delete it and restart to reset credentials")
+		default:
+			slog.Error("credential verification failed", "err", err)
+			writeError(w, http.StatusInternalServerError, "Authentication is temporarily unavailable")
+		}
+		return
+	}
+
+	if !ok {
+		lockedNow, _, lockoutDur := a.limiter.RecordFailure(clientIP)
+		if lockedNow {
+			retryAfter := int(lockoutDur.Seconds()) + 1
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"error":               "Too many failed login attempts. Locked out for 15 minutes.",
+				"retry_after_seconds": retryAfter,
+			})
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "Invalid credentials")
 		return
 	}
 
-	token := a.auth.CreateSession(req.Username)
-	a.auth.SetSessionCookie(w, token)
-
-	// Persist potentially auto-upgraded bcrypt password
-	if a.configPath != "" {
-		_ = a.cfg.Save(a.configPath)
+	a.limiter.RecordSuccess(clientIP)
+	token, err := a.auth.CreateSession(req.Username)
+	if err != nil {
+		slog.Error("failed to create session", "err", err)
+		writeError(w, http.StatusInternalServerError, "Session creation failed")
+		return
 	}
+	a.auth.SetSessionCookie(w, token)
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -180,43 +304,52 @@ func (a *APIHandler) handleDevices(w http.ResponseWriter, r *http.Request) {
 			statuses = a.pinger.GetAllStatuses()
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"devices":  devices,
-			"statuses": statuses,
+			"devices":     devices,
+			"statuses":    statuses,
+			"bind_errors": a.getBindErrors(),
 		})
 
 	case http.MethodPost:
 		var dev config.DeviceConfig
+		r.Body = http.MaxBytesReader(w, r.Body, maxDeviceBodyBytes)
 		if err := json.NewDecoder(r.Body).Decode(&dev); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid JSON payload")
 			return
 		}
 
-		if _, exists := a.cfg.FindDevice(dev.ID); exists {
-			writeError(w, http.StatusBadRequest, "device ID already exists")
-			return
-		}
-
-		if err := a.cfg.AddOrUpdateDevice(dev); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-
-		if a.configPath != "" {
-			if err := a.cfg.Save(a.configPath); err != nil {
-				slog.Error("Failed to save config after adding device", "err", err)
+		err := a.cfg.ApplyDeviceTransaction(func(devices []config.DeviceConfig) ([]config.DeviceConfig, error) {
+			for _, existing := range devices {
+				if existing.ID == dev.ID {
+					return nil, errDeviceExists
+				}
 			}
+			return append(devices, dev), nil
+		})
+		if err != nil {
+			slog.Error("failed to add device", "device_id", dev.ID, "err", err)
+			writeDeviceTransactionError(w, err)
+			return
 		}
 
+		var reloadErr error
 		if a.mode1Reloader != nil {
-			_ = a.mode1Reloader(a.cfg.GetDevices())
+			reloadErr = a.mode1Reloader(a.cfg.GetDevices())
 		}
-		if a.pinger != nil && dev.Enabled {
-			go a.pinger.ProbeDevice(dev)
+		if a.pinger != nil {
+			a.pinger.TriggerSweep()
+		}
+
+		bindErrs := a.getBindErrors()
+		devBindErr := bindErrs[dev.ID]
+		if devBindErr == "" && reloadErr != nil {
+			devBindErr = reloadErr.Error()
 		}
 
 		writeJSON(w, http.StatusCreated, map[string]any{
-			"ok":     true,
-			"device": dev,
+			"ok":          true,
+			"device":      dev,
+			"bind_error":  devBindErr,
+			"bind_errors": bindErrs,
 		})
 
 	default:
@@ -248,7 +381,22 @@ func (a *APIHandler) handleDeviceByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "Latency pinger disabled")
 			return
 		}
-		status := a.pinger.ProbeDevice(dev)
+		status, err := a.pinger.ProbeDeviceNow(dev)
+		if err != nil {
+			switch {
+			case errors.Is(err, telemetry.ErrProbeBusy):
+				w.Header().Set("Retry-After", "1")
+				writeJSON(w, http.StatusTooManyRequests, map[string]any{
+					"error":               "Probe scheduler is busy. Retry shortly.",
+					"retry_after_seconds": 1,
+				})
+			case errors.Is(err, telemetry.ErrProbeStopped):
+				writeError(w, http.StatusServiceUnavailable, "Probe scheduler is shutting down")
+			default:
+				writeError(w, http.StatusInternalServerError, "Probe failed")
+			}
+			return
+		}
 		writeJSON(w, http.StatusOK, status)
 		return
 	}
@@ -256,49 +404,75 @@ func (a *APIHandler) handleDeviceByID(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPut:
 		var dev config.DeviceConfig
+		r.Body = http.MaxBytesReader(w, r.Body, maxDeviceBodyBytes)
 		if err := json.NewDecoder(r.Body).Decode(&dev); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid JSON payload")
 			return
 		}
-		if _, exists := a.cfg.FindDevice(id); !exists {
-			writeError(w, http.StatusNotFound, "Device not found")
+		if dev.ID == "" {
+			dev.ID = id
+		}
+		if dev.ID != id {
+			writeError(w, http.StatusBadRequest, "device ID cannot be changed")
 			return
 		}
 
-		if err := a.cfg.AddOrUpdateDevice(dev); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+		err := a.cfg.ApplyDeviceTransaction(func(devices []config.DeviceConfig) ([]config.DeviceConfig, error) {
+			for i := range devices {
+				if devices[i].ID == id {
+					devices[i] = dev
+					return devices, nil
+				}
+			}
+			return nil, errDeviceNotFound
+		})
+		if err != nil {
+			slog.Error("failed to update device", "device_id", id, "err", err)
+			writeDeviceTransactionError(w, err)
 			return
 		}
 
-		if a.configPath != "" {
-			_ = a.cfg.Save(a.configPath)
-		}
+		var reloadErr error
 		if a.mode1Reloader != nil {
-			_ = a.mode1Reloader(a.cfg.GetDevices())
+			reloadErr = a.mode1Reloader(a.cfg.GetDevices())
 		}
-		if a.pinger != nil && dev.Enabled {
-			go a.pinger.ProbeDevice(dev)
+		if a.pinger != nil {
+			a.pinger.TriggerSweep()
+		}
+
+		bindErrs := a.getBindErrors()
+		devBindErr := bindErrs[dev.ID]
+		if devBindErr == "" && reloadErr != nil {
+			devBindErr = reloadErr.Error()
 		}
 
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":     true,
-			"device": dev,
+			"ok":          true,
+			"device":      dev,
+			"bind_error":  devBindErr,
+			"bind_errors": bindErrs,
 		})
 
 	case http.MethodDelete:
-		if !a.cfg.DeleteDevice(id) {
-			writeError(w, http.StatusNotFound, "Device not found")
+		err := a.cfg.ApplyDeviceTransaction(func(devices []config.DeviceConfig) ([]config.DeviceConfig, error) {
+			for i := range devices {
+				if devices[i].ID == id {
+					return append(devices[:i], devices[i+1:]...), nil
+				}
+			}
+			return nil, errDeviceNotFound
+		})
+		if err != nil {
+			slog.Error("failed to delete device", "device_id", id, "err", err)
+			writeDeviceTransactionError(w, err)
 			return
 		}
 
-		if a.configPath != "" {
-			_ = a.cfg.Save(a.configPath)
-		}
 		if a.mode1Reloader != nil {
 			_ = a.mode1Reloader(a.cfg.GetDevices())
 		}
 		if a.pinger != nil {
-			go a.pinger.ProbeAll()
+			a.pinger.TriggerSweep()
 		}
 
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -411,7 +585,7 @@ func (a *APIHandler) CollectMetrics() map[string]any {
 		activeSessionsCount = len(a.meter.GetSessions())
 	}
 
-	return map[string]any{
+	metrics := map[string]any{
 		"uptime_seconds":        int64(time.Since(a.startTime).Seconds()),
 		"memory_rss_bytes":      rssBytes,
 		"memory_rss_mb":         float64(rssBytes) / (1024 * 1024),
@@ -423,6 +597,24 @@ func (a *APIHandler) CollectMetrics() map[string]any {
 		"total_cumulative_tx":   traffic.TotalCumulativeTx,
 		"active_sessions_count": activeSessionsCount,
 	}
+
+	if a.wsHub != nil {
+		ws := a.wsHub.Stats()
+		metrics["ws_clients"] = ws.Clients
+		metrics["ws_max_clients"] = ws.MaxClients
+		metrics["ws_evictions"] = ws.Evicted
+		metrics["ws_origin_rejections"] = ws.OriginRejected
+		metrics["ws_version_rejections"] = ws.VersionRejected
+	}
+	if a.admission != nil {
+		metrics["admission"] = a.admission.Snapshot()
+	}
+
+	spliceDirections, spliceFallbacks := proxy.SpliceStats()
+	metrics["splice_directions_total"] = spliceDirections
+	metrics["splice_fallbacks_total"] = spliceFallbacks
+
+	return metrics
 }
 
 // BuildTelemetryPayload creates the 1Hz JSON snapshot pushed to connected WebUI clients.
@@ -441,10 +633,18 @@ func (a *APIHandler) BuildTelemetryPayload() []byte {
 		"metrics":         metrics,
 		"sessions":        sessions,
 		"device_statuses": statuses,
+		"bind_errors":     a.getBindErrors(),
 	}
 
 	data, _ := json.Marshal(payload)
 	return data
+}
+
+func (a *APIHandler) getBindErrors() map[string]string {
+	if a.bindErrorsGetter != nil {
+		return a.bindErrorsGetter()
+	}
+	return nil
 }
 
 func (a *APIHandler) findDevice(id string) (config.DeviceConfig, bool) {
@@ -469,6 +669,26 @@ func readProcessRSSBytes() uint64 {
 		}
 	}
 	return 0
+}
+
+var (
+	errDeviceExists   = errors.New("device ID already exists")
+	errDeviceNotFound = errors.New("device not found")
+)
+
+func writeDeviceTransactionError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, config.ErrPersistence):
+		writeError(w, http.StatusInternalServerError, "Failed to persist target configuration")
+	case errors.Is(err, errDeviceExists):
+		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, errDeviceNotFound):
+		writeError(w, http.StatusNotFound, err.Error())
+	case strings.Contains(err.Error(), "collision"), strings.Contains(err.Error(), "conflict"):
+		writeError(w, http.StatusConflict, err.Error())
+	default:
+		writeError(w, http.StatusBadRequest, err.Error())
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {

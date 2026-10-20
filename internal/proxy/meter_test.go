@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"net"
 	"testing"
 	"time"
@@ -97,5 +98,68 @@ func TestMeteredConnWrapper(t *testing.T) {
 
 	if readBytes != 12 || writeBytes != 12 {
 		t.Errorf("expected readBytes=12, writeBytes=12; got read=%d, write=%d", readBytes, writeBytes)
+	}
+}
+
+func TestTrafficMeterRejectsRegistrationDuringShutdown(t *testing.T) {
+	tm := NewTrafficMeter(false)
+	tm.BeginShutdown()
+
+	sess := tm.RegisterSession("dev", "Device", "mode1", "client", "target", func() {})
+	if sess != nil {
+		t.Fatal("expected nil session registration after BeginShutdown")
+	}
+	if tm.ActiveSessionCount() != 0 {
+		t.Fatalf("expected 0 sessions, got %d", tm.ActiveSessionCount())
+	}
+}
+
+func TestTrafficMeterShutdownDisconnectsAndWaits(t *testing.T) {
+	tm := NewTrafficMeter(false)
+	disconnected := make(chan struct{})
+
+	sess := tm.RegisterSession("dev", "Device", "mode1", "client", "target", func() {
+		close(disconnected)
+	})
+	if sess == nil {
+		t.Fatal("expected session registration to succeed before shutdown")
+	}
+
+	go func() {
+		<-disconnected
+		tm.UnregisterSession(sess.ID)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	remaining, err := tm.Shutdown(ctx)
+	if err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("expected no remaining sessions, got %v", remaining)
+	}
+	if tm.ActiveSessionCount() != 0 {
+		t.Fatalf("expected 0 active sessions, got %d", tm.ActiveSessionCount())
+	}
+}
+
+func TestTrafficMeterShutdownTimeoutReportsRemaining(t *testing.T) {
+	tm := NewTrafficMeter(false)
+	sess := tm.RegisterSession("dev", "Device", "mode1", "client", "target", func() {})
+	if sess == nil {
+		t.Fatal("expected session registration to succeed before shutdown")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	remaining, err := tm.Shutdown(ctx)
+	if err == nil {
+		t.Fatal("expected shutdown timeout for a session that never unregisters")
+	}
+	if len(remaining) != 1 || remaining[0] != sess.ID {
+		t.Fatalf("expected remaining session %q, got %v", sess.ID, remaining)
 	}
 }

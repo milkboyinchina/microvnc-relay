@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -27,7 +29,10 @@ func setupTestWebServer(t *testing.T, authEnabled bool) (*Server, *config.Config
 	cfg.Features.WebUIEnabled = true
 	cfg.Security.AuthEnabled = authEnabled
 	cfg.Security.Username = "admin"
-	cfg.Security.PasswordHash = "secret123" // Test plaintext auto-upgrade
+	// Precomputed bcrypt hash for "secret123" at cost 4. Using a low cost keeps
+	// the HTTP integration suite fast; plaintext auto-upgrade is covered by
+	// TestAuthPlaintextConfigHashIsUpgraded.
+	cfg.Security.PasswordHash = "$2a$04$EbJ/8vBHPJSq.0Um0Ptyu.bo7EtTlnr0KnOtAE.NurZ0MzFbgnUsi"
 	cfg.Devices = []config.DeviceConfig{
 		{
 			ID:          "lab-rpi",
@@ -221,6 +226,28 @@ func TestDeviceCRUDAndMetricsEndpoints(t *testing.T) {
 		t.Fatalf("expected 2 devices in cfg, got %d", len(cfg.GetDevices()))
 	}
 
+	// 2b. POST /api/v1/devices with colliding virtual_port -> 409 Conflict
+	conflictDev := config.DeviceConfig{
+		ID:          "kiosk-conflict",
+		Name:        "Kiosk Conflict",
+		Host:        "192.168.1.56",
+		Port:        5900,
+		VirtualPort: 5912, // collides with kiosk-02
+		Enabled:     true,
+	}
+	conflictBody, _ := json.Marshal(conflictDev)
+	respConflict, err := http.Post(addr+"/api/v1/devices", "application/json", bytes.NewReader(conflictBody))
+	if err != nil {
+		t.Fatalf("POST conflict device: %v", err)
+	}
+	_ = respConflict.Body.Close()
+	if respConflict.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict on port collision, got %d", respConflict.StatusCode)
+	}
+	if len(cfg.GetDevices()) != 2 {
+		t.Fatalf("expected devices count to remain 2 after conflict, got %d", len(cfg.GetDevices()))
+	}
+
 	// 3. DELETE /api/v1/devices/kiosk-02
 	reqDel, _ := http.NewRequest(http.MethodDelete, addr+"/api/v1/devices/kiosk-02", nil)
 	respDel, err := http.DefaultClient.Do(reqDel)
@@ -325,6 +352,7 @@ func TestWebSocketTelemetryUpgrade(t *testing.T) {
 }
 
 func TestFirstRunAuthSetupAndReset(t *testing.T) {
+	useFastBcrypt(t)
 	tmpDir := t.TempDir()
 	configPath := tmpDir + "/config.yaml"
 	authPath := tmpDir + "/auth.json"
@@ -377,10 +405,33 @@ func TestFirstRunAuthSetupAndReset(t *testing.T) {
 		t.Fatalf("expected 403 Forbidden before setup, got %d", respDev.StatusCode)
 	}
 
-	// 3. POST /api/v1/auth/setup -> creates auth.json and logs in
-	setupPayload, _ := json.Marshal(map[string]string{
+	// The one-time setup token is printed to stdout/journal and kept in memory.
+	server.auth.mu.RLock()
+	setupToken := server.auth.setupToken
+	server.auth.mu.RUnlock()
+	if setupToken == "" {
+		t.Fatal("expected a non-empty first-run setup token")
+	}
+
+	// 3. POST without the token -> 403 (token-only setup, no localhost bypass)
+	noTokenPayload, _ := json.Marshal(map[string]string{
 		"username": "admin",
 		"password": "mypassword123",
+	})
+	respNoToken, err := http.Post(addr+"/api/v1/auth/setup", "application/json", bytes.NewReader(noTokenPayload))
+	if err != nil {
+		t.Fatalf("POST /auth/setup without token: %v", err)
+	}
+	_ = respNoToken.Body.Close()
+	if respNoToken.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 without setup token, got %d", respNoToken.StatusCode)
+	}
+
+	// 4. POST with the correct token -> creates auth.json and logs in
+	setupPayload, _ := json.Marshal(map[string]string{
+		"username":    "admin",
+		"password":    "mypassword123",
+		"setup_token": setupToken,
 	})
 	respSetup, err := http.Post(addr+"/api/v1/auth/setup", "application/json", bytes.NewReader(setupPayload))
 	if err != nil {
@@ -394,6 +445,16 @@ func TestFirstRunAuthSetupAndReset(t *testing.T) {
 	// Verify auth.json was created on disk
 	if _, err := os.Stat(authPath); err != nil {
 		t.Fatalf("expected auth.json to exist at %s: %v", authPath, err)
+	}
+
+	// 5. A second setup attempt must be refused even with the old token.
+	respAgain, err := http.Post(addr+"/api/v1/auth/setup", "application/json", bytes.NewReader(setupPayload))
+	if err != nil {
+		t.Fatalf("POST /auth/setup again: %v", err)
+	}
+	_ = respAgain.Body.Close()
+	if respAgain.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 on second setup, got %d", respAgain.StatusCode)
 	}
 
 	// Verify session cookie was returned
@@ -453,6 +514,110 @@ func TestIndexHTMLModalNesting(t *testing.T) {
 		t.Fatalf("login-modal is not properly closed before setup-modal: open <div count=%d, close </div> count=%d (diff=%d)",
 			openDivs, closeDivs, openDivs-closeDivs,
 		)
+	}
+}
+
+func TestDeviceCRUDPersistFailureReturns500AndRollsBack(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0644); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+
+	configPath := filepath.Join(dir, "config.yaml")
+	configYAML := fmt.Sprintf(`
+server:
+  web_bind: "127.0.0.1:0"
+  vnc_bind: "127.0.0.1"
+  targets_file: "blocker/targets.yaml"
+features:
+  webui_enabled: true
+  mode1_enabled: false
+  mode2_enabled: false
+  latency_probes_enabled: false
+  bandwidth_metering_enabled: false
+security:
+  auth_enabled: false
+devices:
+  - id: "keep"
+    name: "Keep"
+    host: "127.0.0.1"
+    port: 5900
+    virtual_port: 5910
+    enabled: true
+`)
+	if err := os.WriteFile(configPath, []byte(configYAML), 0640); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	meter := proxy.NewTrafficMeter(false)
+	appLogger, err := logger.New(cfg.Logging, io.Discard)
+	if err != nil {
+		t.Fatalf("logger.New: %v", err)
+	}
+	pinger := telemetry.NewPinger(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+	server, err := NewServer(cfg, configPath, meter, pinger, appLogger, nil, "test")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	if err := server.Start(); err != nil {
+		t.Fatalf("server.Start: %v", err)
+	}
+	defer server.Stop(context.Background())
+
+	addr := "http://" + server.Addr()
+
+	// POST must fail with 500 and leave the existing device list untouched.
+	newDev := config.DeviceConfig{ID: "new", Host: "127.0.0.1", Port: 5901, VirtualPort: 5911, Enabled: true}
+	body, _ := json.Marshal(newDev)
+	respPost, err := http.Post(addr+"/api/v1/devices", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST device: %v", err)
+	}
+	_ = respPost.Body.Close()
+	if respPost.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected 500 on persist failure, got %d", respPost.StatusCode)
+	}
+
+	devices := cfg.GetDevices()
+	if len(devices) != 1 || devices[0].ID != "keep" {
+		t.Fatalf("POST failure mutated devices: %+v", devices)
+	}
+
+	// PUT must fail with 500 and preserve the old name.
+	updated := config.DeviceConfig{ID: "keep", Name: "Changed", Host: "127.0.0.1", Port: 5900, VirtualPort: 5910, Enabled: true}
+	body, _ = json.Marshal(updated)
+	reqPut, _ := http.NewRequest(http.MethodPut, addr+"/api/v1/devices/keep", bytes.NewReader(body))
+	reqPut.Header.Set("Content-Type", "application/json")
+	respPut, err := http.DefaultClient.Do(reqPut)
+	if err != nil {
+		t.Fatalf("PUT device: %v", err)
+	}
+	_ = respPut.Body.Close()
+	if respPut.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected 500 on persist failure, got %d", respPut.StatusCode)
+	}
+	if dev, ok := cfg.FindDevice("keep"); !ok || dev.Name != "Keep" {
+		t.Fatalf("PUT failure mutated device: %+v ok=%v", dev, ok)
+	}
+
+	// DELETE must fail with 500 and keep the device.
+	reqDel, _ := http.NewRequest(http.MethodDelete, addr+"/api/v1/devices/keep", nil)
+	respDel, err := http.DefaultClient.Do(reqDel)
+	if err != nil {
+		t.Fatalf("DELETE device: %v", err)
+	}
+	_ = respDel.Body.Close()
+	if respDel.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected 500 on persist failure, got %d", respDel.StatusCode)
+	}
+	if _, ok := cfg.FindDevice("keep"); !ok {
+		t.Fatal("DELETE failure removed the device from memory")
 	}
 }
 

@@ -1,0 +1,15 @@
+.git
+.github
+.agents
+dist
+build
+bin
+*.exe
+*.test
+*.out
+auth.json
+config.yaml
+targets.yaml
+blueprints
+assets
+web/node_modules

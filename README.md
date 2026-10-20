@@ -105,17 +105,19 @@ Unlike gateways like Apache Guacamole that decode video frames into an uncompres
 
 ## Configuration & NetBird Recipe
 
-`microvnc-relay` is configured via a single `config.yaml`. Here is a production recipe for running on a NetBird node:
+`microvnc-relay` separates static daemon settings (`config.yaml`) from dynamic target machines (`targets.yaml`) so adding or editing targets via the WebUI or CLI never touches your bind addresses or security policies:
 
 ```yaml
+# /etc/microvnc-relay/config.yaml
 server:
   web_bind: "100.64.0.1:8080"  # Bind to your NetBird wt0 interface
   vnc_bind: "100.64.0.1"       # Listeners accessible only via WireGuard mesh
   mode2_reverse_port: 5500     # Reverse VNC target machines connect here
   mode2_viewer_port: 5901      # Viewers connect here specifying matching ID
+  targets_file: "targets.yaml" # Dedicated target list (auto-detected alongside config.yaml)
 
 security:
-  auth_enabled: true           # First run prompts you to create admin password
+  auth_enabled: true           # First run requires the one-time token from journal/docker logs
   session_timeout_minutes: 1440
 
 access_control:
@@ -123,7 +125,31 @@ access_control:
   allowed_subnets:
     - "100.64.0.0/10"          # NetBird overlay subnet only
     - "127.0.0.1/32"
+```
 
+### First-Run Setup (Token-Only)
+
+A fresh install has **no default credentials**. On first start the relay prints a one-time setup token:
+
+```bash
+sudo journalctl -u microvnc-relay -n 50 | grep -i "setup token"
+# Docker:
+docker logs <container> 2>&1 | grep -i "setup token"
+```
+
+Paste that token into the WebUI setup form along with the new administrator username and password. The token is held in memory only, is never served over HTTP, and is invalidated as soon as setup completes.
+
+Password reset is explicit:
+
+```bash
+sudo systemctl stop microvnc-relay
+sudo rm /etc/microvnc-relay/auth.json
+sudo systemctl start microvnc-relay
+# read the newly printed setup token and complete setup again
+```
+
+```yaml
+# /etc/microvnc-relay/targets.yaml
 devices:
   - id: "workbench-pi"
     name: "Workbench Pi 2"
@@ -135,11 +161,66 @@ devices:
 ```
 
 ### Hot-Reload vs. Restart
-- **Adding/Editing Devices**: Can be done live in the WebUI or by editing `devices:` in `config.yaml` and running `sudo systemctl reload microvnc-relay` (or `kill -HUP $MAINPID`). Active connections on other ports will **not** be dropped.
+- **Adding/Editing Devices**: Can be done live in the WebUI (with instant port-conflict detection and status toasts) or by editing `targets.yaml` and running `microvnc-relay --reload` (or `sudo systemctl reload microvnc-relay`). Active connections on other ports will **not** be dropped.
 - **System Settings** (`server.*`, `features.*`, `security.*`): Require `sudo systemctl restart microvnc-relay`.
-- **Config Validation**: Test your configuration before restarting with `microvnc-relay -c config.yaml --check-config` (exit code `0` = valid).
+- **Config Validation**: Test your configuration and check for port collisions before restarting with `microvnc-relay -c config.yaml --check-config` (exit code `0` = valid).
 
 ---
+
+## Development & Gate 0 Verification
+
+Run the fast checks:
+
+```bash
+go test ./...
+go vet ./...
+go test -race ./...
+```
+
+Cross-build the full matrix:
+
+```bash
+CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=6 go build ./...
+CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build ./...
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./...
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build ./...
+```
+
+### Dev-only Docker Data-Plane Harness
+
+`deploy/dev/compose.yaml` builds a four-relay topology (`Hub ➔ Site DMZ ➔ Floor Pi ➔ target`) plus synthetic VNC targets. Each relay binds the real per-hop ports in its own container netns; only the Hub and Site DMZ publish host ports.
+
+```bash
+bash scripts/gate0-compose.sh
+
+# optional tc netem 50ms / 1% loss
+GATE0_WITH_NETEM=1 bash scripts/gate0-compose.sh
+
+# optional A -> B -> A loop; admission caps contain it
+GATE0_WITH_LOOP=1 bash scripts/gate0-compose.sh
+```
+
+This image is built with `-tags dev` and includes `synthetic-vnc`, fault injection (`/debug/fault/rst`, `/debug/fault/drop`), and pprof. It is **not** the production image; production containerization stays in Phase 4.
+
+### Soak Testing
+
+Run from a workstation, never from the Pi itself:
+
+```bash
+bash scripts/soak.sh \
+  --relay 100.100.131.74 \
+  --duration 86400 \
+  --streams 10 \
+  --ssh-host nb-api-apipi
+```
+
+The script repeatedly drives 30s stream ramps, records RSS/cgroup memory/Slab/FD/heartbeat to CSV, and aborts on two missed heartbeats, RSS above 32MB, or available RAM below 400MB.
+
+On the relay host, `scripts/verify-pi2.sh` reports RSS, cgroup memory, kernel Slab, FDs, goroutines (dev build), disk writes, and API health.
+
+### Cloned SD/eMMC Images
+
+`scripts/prepare-cloned-image.sh` regenerates the machine-id, deletes `auth.json`, and removes the future relay identity state file so a cloned card does not share credentials or identity. It deliberately leaves `targets.yaml` for manual review.
 
 ## Explicit Non-Goals (Delegate Outward)
 
@@ -154,7 +235,8 @@ To ensure this daemon remains under 35MB RSS and never wears out MicroSD flash s
 
 | Platform | Architecture | System RAM | Process Budget | Measured RSS |
 |---|---|---|---|---|
-| **Raspberry Pi 2 / Orange Pi Zero LTS** | ARMv7 (`armv7l`) | 256MB – 512MB | < 30 MB | **~8.9 MB** |
+| **Raspberry Pi 1 (A/B/B+) & Pi Zero / Zero W** | ARMv6 (`armv6l` / `armhf`, `GOARM=6`) | 256MB – 512MB | < 25 MB | **~8.5 MB** |
+| **Raspberry Pi 2 / Orange Pi Zero LTS** | ARMv7 (`armv7l`, `GOARM=7`) | 256MB – 512MB | < 30 MB | **~8.9 MB** |
 | **Armbian TV Boxes** | ARMv7 / ARM64 | 512MB – 1GB | < 35 MB | **~9.5 MB** |
 | **Raspberry Pi 3/4/5** | ARM64 (`aarch64`) | 1GB – 8GB | < 35 MB | **~9.7 MB** |
 | **Linux Servers & Workstations** | x86-64 (`amd64`) | 1GB+ | < 40 MB | **~10.5 MB** |

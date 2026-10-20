@@ -249,7 +249,16 @@
       <form id="setup-form">
         <div class="modal-body">
           <p class="text-muted" style="font-size: 13px;">Create an administrator username and password to secure your relay.</p>
+          <p class="text-muted" style="font-size: 12px;">
+            First-run setup requires the one-time token printed at startup. Read it with
+            <code>journalctl -u microvnc-relay</code> or <code>docker logs &lt;container&gt;</code>.
+            The token is never shown again after setup completes.
+          </p>
           <div class="alert danger" id="setup-error" style="display: none;"></div>
+          <div class="form-group">
+            <label for="setup-token">One-Time Setup Token</label>
+            <input type="password" id="setup-token" class="form-control" required autocomplete="off" spellcheck="false" placeholder="Token from journalctl / docker logs">
+          </div>
           <div class="form-group">
             <label for="setup-username">Username</label>
             <input type="text" id="setup-username" class="form-control" value="admin" required autocomplete="username">

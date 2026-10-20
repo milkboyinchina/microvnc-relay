@@ -213,7 +213,7 @@ func startLoopback(n int) *loopbackEngine {
 		} else if attempt >= 4 {
 			panic(err)
 		}
-		m1.Stop()
+		m1.Stop(context.Background())
 	}
 }
 
@@ -251,10 +251,10 @@ func loopbackConfig(n int) *config.Config {
 
 func (e *loopbackEngine) stop() {
 	if e.mode1 != nil {
-		e.mode1.Stop()
+		e.mode1.Stop(context.Background())
 	}
 	if e.mode2 != nil {
-		e.mode2.Stop()
+		e.mode2.Stop(context.Background())
 	}
 }
 
@@ -514,7 +514,7 @@ func runMode2Fuzz(ctx context.Context, log *slog.Logger) error {
 		if err := m2.Start(); err != nil {
 			return err
 		}
-		defer m2.Stop()
+		defer m2.Stop(context.Background())
 		revAddr = m2.ReverseAddr()
 		viewAddr = m2.ViewerAddr()
 	} else {

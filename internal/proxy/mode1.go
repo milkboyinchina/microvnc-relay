@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -19,13 +20,17 @@ type mode1Listener struct {
 
 // Mode1Manager manages dedicated virtual port listeners for Mode 1 direct port-mapped devices.
 type Mode1Manager struct {
-	cfg       *config.Config
-	meter     *TrafficMeter
-	log       *slog.Logger
-	mu        sync.Mutex
-	listeners map[string]*mode1Listener
-	wg        sync.WaitGroup
-	stopped   bool
+	cfg          *config.Config
+	meter        *TrafficMeter
+	log          *slog.Logger
+	mu           sync.Mutex
+	listeners    map[string]*mode1Listener
+	bindErrors   map[string]string
+	acceptWG     sync.WaitGroup
+	connWG       sync.WaitGroup
+	stopped      bool
+	admission    *AdmissionController
+	handshakeSem *Semaphore
 }
 
 // NewMode1Manager creates a new Mode 1 Port-Mapped Proxy manager.
@@ -34,11 +39,19 @@ func NewMode1Manager(cfg *config.Config, meter *TrafficMeter, log *slog.Logger) 
 		log = slog.Default()
 	}
 	return &Mode1Manager{
-		cfg:       cfg,
-		meter:     meter,
-		log:       log,
-		listeners: make(map[string]*mode1Listener),
+		cfg:          cfg,
+		meter:        meter,
+		log:          log,
+		listeners:    make(map[string]*mode1Listener),
+		bindErrors:   make(map[string]string),
+		handshakeSem: NewSemaphore(cfg.ConnectionLimits.MaxPendingHandshakes),
 	}
+}
+
+// SetAdmissionController attaches the process-wide session admission controller.
+// It must be called before Start.
+func (m *Mode1Manager) SetAdmissionController(admission *AdmissionController) {
+	m.admission = admission
 }
 
 // Start opens TCP listeners for all enabled Mode 1 devices in the configuration.
@@ -67,6 +80,13 @@ func (m *Mode1Manager) Reload(devices []config.DeviceConfig) error {
 		}
 	}
 
+	// Prune stale bind errors for removed or disabled devices
+	for id := range m.bindErrors {
+		if _, exists := desired[id]; !exists {
+			delete(m.bindErrors, id)
+		}
+	}
+
 	// Stop listeners that were removed or had their port/target changed
 	for id, active := range m.listeners {
 		want, exists := desired[id]
@@ -87,13 +107,21 @@ func (m *Mode1Manager) Reload(devices []config.DeviceConfig) error {
 	var firstErr error
 	for id, dev := range desired {
 		if _, alreadyRunning := m.listeners[id]; alreadyRunning {
+			delete(m.bindErrors, id)
 			continue
 		}
 		if err := m.startDeviceListenerLocked(dev); err != nil {
-			m.log.Error("failed to start Mode 1 listener", "device_id", id, "virtual_port", dev.VirtualPort, "err", err)
+			m.bindErrors[id] = fmt.Sprintf("Port :%d already in use (%v)", dev.VirtualPort, err)
+			m.log.Error("[PORT COLLISION] failed to bind Mode 1 virtual port",
+				"device_id", id,
+				"virtual_port", dev.VirtualPort,
+				"err", err,
+			)
 			if firstErr == nil {
 				firstErr = err
 			}
+		} else {
+			delete(m.bindErrors, id)
 		}
 	}
 
@@ -125,13 +153,13 @@ func (m *Mode1Manager) startDeviceListenerLocked(dev config.DeviceConfig) error 
 		"target", net.JoinHostPort(dev.Host, fmt.Sprintf("%d", dev.Port)),
 	)
 
-	m.wg.Add(1)
+	m.acceptWG.Add(1)
 	go m.acceptLoop(m1)
 	return nil
 }
 
 func (m *Mode1Manager) acceptLoop(m1 *mode1Listener) {
-	defer m.wg.Done()
+	defer m.acceptWG.Done()
 
 	for {
 		clientConn, err := m1.listener.Accept()
@@ -152,21 +180,69 @@ func (m *Mode1Manager) acceptLoop(m1 *mode1Listener) {
 		dev := m1.device
 		m.mu.Unlock()
 
-		m.wg.Add(1)
+		m.connWG.Add(1)
 		go func(conn net.Conn, d config.DeviceConfig) {
-			defer m.wg.Done()
+			defer m.connWG.Done()
 			m.handleClient(conn, d)
 		}(clientConn, dev)
 	}
 }
 
 func (m *Mode1Manager) handleClient(clientConn net.Conn, dev config.DeviceConfig) {
+	ConfigureTCPConn(clientConn, m.cfg.ConnectionLimits.TCPKeepAliveSec, m.cfg.ConnectionLimits.TCPUserTimeoutSec)
+
+	handshakeHeld := false
+	if m.handshakeSem != nil {
+		if !m.handshakeSem.TryAcquire() {
+			if m.admission != nil {
+				m.admission.RecordHandshakeRejection()
+			}
+			m.log.Warn("Mode 1 rejected: pending handshake cap reached",
+				"device_id", dev.ID,
+				"client_ip", clientConn.RemoteAddr().String(),
+			)
+			RejectConn(clientConn)
+			return
+		}
+		handshakeHeld = true
+	}
+	releaseHandshake := func() {
+		if handshakeHeld {
+			m.handshakeSem.Release()
+			handshakeHeld = false
+		}
+	}
+	defer releaseHandshake()
+
 	remoteIP := ExtractRemoteIP(clientConn.RemoteAddr())
 	if !m.cfg.IsIPAllowed(remoteIP) {
 		m.log.Warn("rejected Mode 1 client outside CIDR allowlist",
 			"device_id", dev.ID,
 			"client_ip", clientConn.RemoteAddr().String(),
 		)
+		_ = clientConn.Close()
+		return
+	}
+
+	if m.admission != nil {
+		releaseAdmission, ok := m.admission.TryAcquire(dev.ID)
+		if !ok {
+			m.log.Warn("Mode 1 rejected: session admission cap reached",
+				"device_id", dev.ID,
+				"client_ip", clientConn.RemoteAddr().String(),
+			)
+			RejectConn(clientConn)
+			return
+		}
+		defer releaseAdmission()
+	}
+
+	if rst, drop := faultActive(); rst {
+		m.log.Warn("Mode 1 fault injection: resetting client", "device_id", dev.ID)
+		RejectConn(clientConn)
+		return
+	} else if drop {
+		m.log.Warn("Mode 1 fault injection: dropping client", "device_id", dev.ID)
 		_ = clientConn.Close()
 		return
 	}
@@ -189,6 +265,7 @@ func (m *Mode1Manager) handleClient(clientConn net.Conn, dev config.DeviceConfig
 		_ = clientConn.Close()
 		return
 	}
+	ConfigureTCPConn(targetConn, m.cfg.ConnectionLimits.TCPKeepAliveSec, m.cfg.ConnectionLimits.TCPUserTimeoutSec)
 
 	closeBoth := func() {
 		_ = clientConn.Close()
@@ -205,9 +282,17 @@ func (m *Mode1Manager) handleClient(clientConn net.Conn, dev config.DeviceConfig
 			targetAddr,
 			closeBoth,
 		)
+		if sess == nil {
+			m.log.Warn("Mode 1 session rejected during shutdown", "device_id", dev.ID)
+			closeBoth()
+			return
+		}
 		sess.SetTargetRTT(dialRTT)
 		defer m.meter.UnregisterSession(sess.ID)
 	}
+
+	// The socket is now authenticated/admitted; release the pre-auth slot.
+	releaseHandshake()
 
 	m.log.Info("Mode 1 session established",
 		"session_id", func() string {
@@ -246,11 +331,24 @@ func (m *Mode1Manager) ListenerAddr(deviceID string) string {
 	return ""
 }
 
-// Stop closes all active Mode 1 listeners and waits for active handlers to finish.
-func (m *Mode1Manager) Stop() {
+// GetBindErrors returns a thread-safe snapshot of per-device port collision/bind errors.
+func (m *Mode1Manager) GetBindErrors() map[string]string {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]string, len(m.bindErrors))
+	for k, v := range m.bindErrors {
+		out[k] = v
+	}
+	return out
+}
+
+// StopAccepting closes all Mode 1 listeners and prevents new sessions. Active
+// sessions are closed by TrafficMeter.Shutdown.
+func (m *Mode1Manager) StopAccepting() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if m.stopped {
-		m.mu.Unlock()
 		return
 	}
 	m.stopped = true
@@ -259,7 +357,28 @@ func (m *Mode1Manager) Stop() {
 		_ = m1.listener.Close()
 		delete(m.listeners, id)
 	}
-	m.mu.Unlock()
+	m.bindErrors = make(map[string]string)
+}
 
-	m.wg.Wait()
+// Stop closes listeners and waits for accept loops and active handlers. The
+// wait is bounded by ctx; a timed-out shutdown reports the remaining handlers.
+func (m *Mode1Manager) Stop(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.StopAccepting()
+	m.acceptWG.Wait()
+
+	done := make(chan struct{})
+	go func() {
+		m.connWG.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("mode1 shutdown timed out with active handlers: %w", ctx.Err())
+	}
 }

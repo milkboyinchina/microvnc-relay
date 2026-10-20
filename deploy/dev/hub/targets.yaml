@@ -1,0 +1,15 @@
+targets:
+  - id: hub-direct
+    name: "Hub Direct Target"
+    host: "vnc-target-1"
+    port: 5900
+    virtual_port: 5910
+    enabled: true
+
+  # Immediate next hop only: the Hub forwards to the Site DMZ relay.
+  - id: to-dmz
+    name: "Site DMZ Data-Plane Chain"
+    host: "site-dmz"
+    port: 5910
+    virtual_port: 5911
+    enabled: true

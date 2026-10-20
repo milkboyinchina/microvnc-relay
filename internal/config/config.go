@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -29,6 +30,9 @@ type ServerConfig struct {
 	VNCBind          string `yaml:"vnc_bind"`
 	Mode2ReversePort int    `yaml:"mode2_reverse_port"`
 	Mode2ViewerPort  int    `yaml:"mode2_viewer_port"`
+	// TargetsFile is the documented location for the dynamic targets file.
+	// Config.TargetsFile remains as a legacy top-level fallback.
+	TargetsFile string `yaml:"targets_file,omitempty"`
 }
 
 // SecurityConfig holds WebUI authentication credentials and parameters.
@@ -37,6 +41,9 @@ type SecurityConfig struct {
 	Username              string `yaml:"username"`
 	PasswordHash          string `yaml:"password_hash"`
 	SessionTimeoutMinutes int    `yaml:"session_timeout_minutes"`
+	// SecureCookies sets the Secure attribute on session cookies. Enable
+	// when the WebUI is served over HTTPS (reverse proxy or overlay TLS).
+	SecureCookies bool `yaml:"secure_cookies"`
 }
 
 // AccessControlConfig manages CIDR-based client IP filtering.
@@ -48,11 +55,22 @@ type AccessControlConfig struct {
 
 // ConnectionLimitsConfig manages timeouts, keepalive, and QoS bandwidth limits.
 type ConnectionLimitsConfig struct {
-	TCPKeepAliveSec         int `yaml:"tcp_keepalive_sec"`
-	DialTimeoutSec          int `yaml:"dial_timeout_sec"`
-	IdleTimeoutSec          int `yaml:"idle_timeout_sec"`
-	MaxSessionKBps          int `yaml:"max_session_kbps"`
-	Mode2HandshakeTimeoutSec int `yaml:"mode2_handshake_timeout_sec"`
+	TCPKeepAliveSec           int `yaml:"tcp_keepalive_sec"`
+	TCPUserTimeoutSec         int `yaml:"tcp_user_timeout_sec"`
+	DialTimeoutSec            int `yaml:"dial_timeout_sec"`
+	IdleTimeoutSec            int `yaml:"idle_timeout_sec"`
+	MaxSessionKBps            int `yaml:"max_session_kbps"`
+	Mode2HandshakeTimeoutSec  int `yaml:"mode2_handshake_timeout_sec"`
+	Mode2ViewerWaitTimeoutSec int `yaml:"mode2_viewer_wait_timeout_sec"`
+	HalfCloseTimeoutSec       int `yaml:"half_close_timeout_sec"`
+
+	// Hard admission caps. These are deliberately configurable but bounded:
+	// sync.Pool reuses buffers, it does not cap concurrency. Raising these
+	// values invalidates the <35MB rated-load claim until re-measured.
+	MaxTotalSessions     int `yaml:"max_total_sessions"`
+	MaxSessionsPerDevice int `yaml:"max_sessions_per_device"`
+	MaxPendingHandshakes int `yaml:"max_pending_handshakes"`
+	MaxWSClients         int `yaml:"max_ws_clients"`
 }
 
 // LoggingConfig manages log file settings and in-memory ring buffer capacity.
@@ -86,6 +104,8 @@ type DeviceConfig struct {
 // Config is the root application configuration structure.
 type Config struct {
 	mu               sync.RWMutex
+	targetsPath      string
+	TargetsFile      string                 `yaml:"targets_file,omitempty"`
 	Features         FeaturesConfig         `yaml:"features"`
 	Server           ServerConfig           `yaml:"server"`
 	Security         SecurityConfig         `yaml:"security"`
@@ -95,6 +115,14 @@ type Config struct {
 	Telemetry        TelemetryConfig        `yaml:"telemetry"`
 	Devices          []DeviceConfig         `yaml:"devices"`
 }
+
+// ErrPersistence marks a failure to write configuration to disk. Handlers map
+// this to HTTP 500 rather than a validation error.
+var ErrPersistence = errors.New("persist configuration")
+
+// DeviceMutation receives a copy of the current device list and returns the
+// candidate list to validate and persist.
+type DeviceMutation func([]DeviceConfig) ([]DeviceConfig, error)
 
 // DefaultConfig returns a fully populated configuration with production-safe defaults.
 func DefaultConfig() *Config {
@@ -115,9 +143,10 @@ func DefaultConfig() *Config {
 			Mode2ViewerPort:  5901,
 		},
 		Security: SecurityConfig{
+			// No default credentials: a fresh install must complete first-run
+			// setup (auth.json) before any session can be issued. Preloading a
+			// known default hash bypasses the first-run setup gate (audit F8).
 			AuthEnabled:           true,
-			Username:              "admin",
-			PasswordHash:          "$2a$12$e8N4O1.UqMh0z7e5k8aE1.9JgU6P8f2K4r3B1t0y9u8i7o6p5q4w3", // "admin"
 			SessionTimeoutMinutes: 1440,
 		},
 		AccessControl: AccessControlConfig{
@@ -130,11 +159,18 @@ func DefaultConfig() *Config {
 			},
 		},
 		ConnectionLimits: ConnectionLimitsConfig{
-			TCPKeepAliveSec:         30,
-			DialTimeoutSec:          5,
-			IdleTimeoutSec:          0,
-			MaxSessionKBps:          0,
-			Mode2HandshakeTimeoutSec: 5,
+			TCPKeepAliveSec:           15,
+			TCPUserTimeoutSec:         30,
+			DialTimeoutSec:            5,
+			IdleTimeoutSec:            0,
+			MaxSessionKBps:            0,
+			Mode2HandshakeTimeoutSec:  5,
+			Mode2ViewerWaitTimeoutSec: 10,
+			HalfCloseTimeoutSec:       5,
+			MaxTotalSessions:          32,
+			MaxSessionsPerDevice:      8,
+			MaxPendingHandshakes:      64,
+			MaxWSClients:              8,
 		},
 		Logging: LoggingConfig{
 			DiskLogging:         false,
@@ -165,6 +201,26 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config yaml: %w", err)
 	}
 
+	// Resolve standalone targets file path. The documented location is
+	// server.targets_file; the top-level targets_file is kept for backward
+	// compatibility with older configs.
+	targetsFile := strings.TrimSpace(cfg.Server.TargetsFile)
+	if targetsFile == "" {
+		targetsFile = cfg.TargetsFile
+	}
+	cfg.targetsPath = ResolveTargetsPath(path, targetsFile)
+
+	// If standalone targets.yaml exists on disk, load targets from it
+	if _, err := os.Stat(cfg.targetsPath); err == nil {
+		targets, err := LoadTargetsFile(cfg.targetsPath)
+		if err != nil {
+			return nil, fmt.Errorf("load targets file %s: %w", cfg.targetsPath, err)
+		}
+		cfg.Devices = targets
+	} else if len(cfg.Devices) > 0 {
+		// Backwards compatibility: loaded inline from config.yaml devices key
+	}
+
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}
@@ -176,10 +232,29 @@ func Load(path string) (*Config, error) {
 func (c *Config) Validate() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.validateLocked()
+}
 
+func (c *Config) validateLocked() error {
 	// Server validation
-	if c.Features.WebUIEnabled && c.Server.WebBind == "" {
-		return errors.New("server.web_bind must be specified when webui_enabled is true")
+	var webPort int
+	if c.Features.WebUIEnabled {
+		if c.Server.WebBind == "" {
+			return errors.New("server.web_bind must be specified when webui_enabled is true")
+		}
+		_, portStr, err := net.SplitHostPort(c.Server.WebBind)
+		if err != nil {
+			return fmt.Errorf("invalid server.web_bind %q: %w", c.Server.WebBind, err)
+		}
+		p, err := strconv.Atoi(portStr)
+		if err != nil || p < 0 || p > 65535 {
+			return fmt.Errorf("invalid server.web_bind port %q", portStr)
+		}
+		webPort = p
+	}
+
+	if (c.Features.Mode1Enabled || c.Features.Mode2Enabled) && strings.TrimSpace(c.Server.VNCBind) == "" {
+		return errors.New("server.vnc_bind must be specified when Mode 1 or Mode 2 is enabled")
 	}
 
 	if c.Features.Mode2Enabled {
@@ -191,6 +266,12 @@ func (c *Config) Validate() error {
 		}
 		if c.Server.Mode2ReversePort == c.Server.Mode2ViewerPort {
 			return errors.New("mode2_reverse_port and mode2_viewer_port cannot be identical")
+		}
+		if webPort > 0 && webPort == c.Server.Mode2ReversePort {
+			return fmt.Errorf("port collision: server.web_bind port %d conflicts with mode2_reverse_port %d", webPort, c.Server.Mode2ReversePort)
+		}
+		if webPort > 0 && webPort == c.Server.Mode2ViewerPort {
+			return fmt.Errorf("port collision: server.web_bind port %d conflicts with mode2_viewer_port %d", webPort, c.Server.Mode2ViewerPort)
 		}
 	}
 
@@ -229,13 +310,36 @@ func (c *Config) Validate() error {
 
 	// Connection limits defaults
 	if c.ConnectionLimits.TCPKeepAliveSec <= 0 {
-		c.ConnectionLimits.TCPKeepAliveSec = 30
+		c.ConnectionLimits.TCPKeepAliveSec = 15
+	}
+	if c.ConnectionLimits.TCPUserTimeoutSec <= 0 {
+		c.ConnectionLimits.TCPUserTimeoutSec = 30
 	}
 	if c.ConnectionLimits.DialTimeoutSec <= 0 {
 		c.ConnectionLimits.DialTimeoutSec = 5
 	}
 	if c.ConnectionLimits.Mode2HandshakeTimeoutSec <= 0 {
 		c.ConnectionLimits.Mode2HandshakeTimeoutSec = 5
+	}
+	if c.ConnectionLimits.Mode2ViewerWaitTimeoutSec <= 0 {
+		c.ConnectionLimits.Mode2ViewerWaitTimeoutSec = 10
+	}
+	if c.ConnectionLimits.HalfCloseTimeoutSec <= 0 {
+		c.ConnectionLimits.HalfCloseTimeoutSec = 5
+	}
+
+	var limitErr error
+	if c.ConnectionLimits.MaxTotalSessions, limitErr = boundedLimit("max_total_sessions", c.ConnectionLimits.MaxTotalSessions, 32, 256); limitErr != nil {
+		return limitErr
+	}
+	if c.ConnectionLimits.MaxSessionsPerDevice, limitErr = boundedLimit("max_sessions_per_device", c.ConnectionLimits.MaxSessionsPerDevice, 8, 64); limitErr != nil {
+		return limitErr
+	}
+	if c.ConnectionLimits.MaxPendingHandshakes, limitErr = boundedLimit("max_pending_handshakes", c.ConnectionLimits.MaxPendingHandshakes, 64, 512); limitErr != nil {
+		return limitErr
+	}
+	if c.ConnectionLimits.MaxWSClients, limitErr = boundedLimit("max_ws_clients", c.ConnectionLimits.MaxWSClients, 8, 64); limitErr != nil {
+		return limitErr
 	}
 
 	// Telemetry defaults
@@ -260,19 +364,31 @@ func (c *Config) Validate() error {
 		}
 		seenIDs[dev.ID] = true
 
-		if strings.TrimSpace(dev.Host) == "" {
-			return fmt.Errorf("device %q has empty host", dev.ID)
-		}
-		if dev.Port <= 0 || dev.Port > 65535 {
-			return fmt.Errorf("device %q has invalid target port: %d", dev.ID, dev.Port)
+		isMode2ReverseOnly := dev.Mode2ID > 0 && dev.VirtualPort == 0
+		if !isMode2ReverseOnly {
+			if strings.TrimSpace(dev.Host) == "" {
+				return fmt.Errorf("device %q has empty host", dev.ID)
+			}
+			if dev.Port <= 0 || dev.Port > 65535 {
+				return fmt.Errorf("device %q has invalid target port: %d", dev.ID, dev.Port)
+			}
 		}
 
 		if dev.VirtualPort > 0 {
 			if dev.VirtualPort > 65535 {
 				return fmt.Errorf("device %q has invalid virtual_port: %d", dev.ID, dev.VirtualPort)
 			}
+			if webPort > 0 && dev.VirtualPort == webPort {
+				return fmt.Errorf("port collision: virtual_port %d for device %q conflicts with WebUI server port (%s)", dev.VirtualPort, dev.ID, c.Server.WebBind)
+			}
+			if c.Features.Mode2Enabled && dev.VirtualPort == c.Server.Mode2ReversePort {
+				return fmt.Errorf("port collision: virtual_port %d for device %q conflicts with Mode 2 reverse port (%d)", dev.VirtualPort, dev.ID, c.Server.Mode2ReversePort)
+			}
+			if c.Features.Mode2Enabled && dev.VirtualPort == c.Server.Mode2ViewerPort {
+				return fmt.Errorf("port collision: virtual_port %d for device %q conflicts with Mode 2 viewer port (%d)", dev.VirtualPort, dev.ID, c.Server.Mode2ViewerPort)
+			}
 			if existingID, ok := seenVirtualPorts[dev.VirtualPort]; ok {
-				return fmt.Errorf("virtual_port %d conflict between device %q and %q", dev.VirtualPort, existingID, dev.ID)
+				return fmt.Errorf("port collision: virtual_port %d conflict between device %q and %q", dev.VirtualPort, existingID, dev.ID)
 			}
 			seenVirtualPorts[dev.VirtualPort] = dev.ID
 		}
@@ -288,6 +404,21 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// boundedLimit applies a safe default and a hard safety ceiling to an
+// admission limit. Zero means "use the default", never "unlimited".
+func boundedLimit(name string, value, defaultValue, ceiling int) (int, error) {
+	if value < 0 {
+		return 0, fmt.Errorf("%s cannot be negative: %d", name, value)
+	}
+	if value == 0 {
+		return defaultValue, nil
+	}
+	if value > ceiling {
+		return 0, fmt.Errorf("%s %d exceeds safety ceiling %d", name, value, ceiling)
+	}
+	return value, nil
+}
+
 // IsIPAllowed checks if an incoming remote IP address is permitted under access control rules.
 func (c *Config) IsIPAllowed(ip net.IP) bool {
 	c.mu.RLock()
@@ -295,6 +426,12 @@ func (c *Config) IsIPAllowed(ip net.IP) bool {
 
 	if !c.AccessControl.Enabled || len(c.AccessControl.allowedNets) == 0 {
 		return true
+	}
+	if ip == nil {
+		return false
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		ip = ip4
 	}
 
 	for _, ipNet := range c.AccessControl.allowedNets {
@@ -394,8 +531,14 @@ func (c *Config) FindDeviceByMode2ID(id int) (DeviceConfig, bool) {
 }
 
 // AddOrUpdateDevice updates an existing device or appends a new device, re-validating the configuration.
+// If validation fails (e.g. due to port collision), the change is rolled back cleanly.
 func (c *Config) AddOrUpdateDevice(dev DeviceConfig) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	backup := make([]DeviceConfig, len(c.Devices))
+	copy(backup, c.Devices)
+
 	found := false
 	for i, d := range c.Devices {
 		if d.ID == dev.ID {
@@ -407,9 +550,117 @@ func (c *Config) AddOrUpdateDevice(dev DeviceConfig) error {
 	if !found {
 		c.Devices = append(c.Devices, dev)
 	}
-	c.mu.Unlock()
 
-	return c.Validate()
+	if err := c.validateLocked(); err != nil {
+		c.Devices = backup
+		return err
+	}
+
+	return nil
+}
+
+// ApplyDeviceTransaction validates and persists a candidate device list before
+// committing it to memory. A failed validation or write leaves the current
+// in-memory configuration untouched.
+func (c *Config) ApplyDeviceTransaction(mut DeviceMutation) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	candidate, err := mut(append([]DeviceConfig(nil), c.Devices...))
+	if err != nil {
+		return err
+	}
+	if candidate == nil {
+		candidate = []DeviceConfig{}
+	}
+
+	backup := c.Devices
+	c.Devices = candidate
+	if err := c.validateLocked(); err != nil {
+		c.Devices = backup
+		return err
+	}
+
+	if c.targetsPath != "" {
+		if err := SaveTargetsFile(c.targetsPath, candidate); err != nil {
+			c.Devices = backup
+			return fmt.Errorf("%w: %v", ErrPersistence, err)
+		}
+	}
+
+	return nil
+}
+
+// ApplyReload applies the hot-reloadable fields from newCfg and returns a list
+// of changes that require a full restart. Devices, access control, connection
+// limits, and the target ping interval are applied atomically; if validation of
+// the new values fails, the old values are restored.
+func (c *Config) ApplyReload(newCfg *Config) ([]string, error) {
+	if newCfg == nil {
+		return nil, errors.New("reload config is nil")
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var warnings []string
+	addWarning := func(detail string) {
+		warnings = append(warnings, detail)
+	}
+
+	if c.Server.WebBind != newCfg.Server.WebBind ||
+		c.Server.VNCBind != newCfg.Server.VNCBind ||
+		c.Server.Mode2ReversePort != newCfg.Server.Mode2ReversePort ||
+		c.Server.Mode2ViewerPort != newCfg.Server.Mode2ViewerPort {
+		addWarning("server bind/port settings changed; full restart required")
+	}
+	if c.Security != newCfg.Security {
+		addWarning("security settings changed; full restart required")
+	}
+	if c.Logging != newCfg.Logging {
+		addWarning("logging settings changed; full restart required")
+	}
+	if c.Features != newCfg.Features {
+		addWarning("feature flags changed; full restart required")
+	}
+	if c.Telemetry.BroadcastIntervalSec != newCfg.Telemetry.BroadcastIntervalSec {
+		addWarning("telemetry.broadcast_interval_sec changed; full restart required")
+	}
+	if c.ConnectionLimits.MaxTotalSessions != newCfg.ConnectionLimits.MaxTotalSessions ||
+		c.ConnectionLimits.MaxSessionsPerDevice != newCfg.ConnectionLimits.MaxSessionsPerDevice ||
+		c.ConnectionLimits.MaxPendingHandshakes != newCfg.ConnectionLimits.MaxPendingHandshakes ||
+		c.ConnectionLimits.MaxWSClients != newCfg.ConnectionLimits.MaxWSClients {
+		addWarning("session admission caps changed; full restart required")
+	}
+
+	backupDevices := c.Devices
+	backupACL := c.AccessControl
+	backupLimits := c.ConnectionLimits
+	backupPingInterval := c.Telemetry.TargetPingIntervalSec
+	backupTargetsFile := c.TargetsFile
+	backupServerTargetsFile := c.Server.TargetsFile
+	backupTargetsPath := c.targetsPath
+
+	c.Devices = append([]DeviceConfig(nil), newCfg.Devices...)
+	c.AccessControl = newCfg.AccessControl
+	c.ConnectionLimits = newCfg.ConnectionLimits
+	c.Telemetry.TargetPingIntervalSec = newCfg.Telemetry.TargetPingIntervalSec
+	c.TargetsFile = newCfg.TargetsFile
+	c.Server.TargetsFile = newCfg.Server.TargetsFile
+	c.targetsPath = newCfg.targetsPath
+
+	if err := c.validateLocked(); err != nil {
+		c.Devices = backupDevices
+		c.AccessControl = backupACL
+		c.ConnectionLimits = backupLimits
+		c.Telemetry.TargetPingIntervalSec = backupPingInterval
+		c.TargetsFile = backupTargetsFile
+		c.Server.TargetsFile = backupServerTargetsFile
+		c.targetsPath = backupTargetsPath
+		return warnings, fmt.Errorf("reload validation: %w", err)
+	}
+
+	return warnings, nil
 }
 
 // DeleteDevice removes a device by ID. Returns true if removed, false if not found.
@@ -434,4 +685,72 @@ func (c *Config) GetDevices() []DeviceConfig {
 	result := make([]DeviceConfig, len(c.Devices))
 	copy(result, c.Devices)
 	return result
+}
+
+// SetDevices replaces the in-memory device list after validating for conflicts.
+func (c *Config) SetDevices(devs []DeviceConfig) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	backup := c.Devices
+	copied := make([]DeviceConfig, len(devs))
+	copy(copied, devs)
+	c.Devices = copied
+
+	if err := c.validateLocked(); err != nil {
+		c.Devices = backup
+		return err
+	}
+	return nil
+}
+
+// TargetsPath returns the path to the active targets file.
+func (c *Config) TargetsPath() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.targetsPath
+}
+
+// ReloadTargets re-reads the targets file from disk, validates it, and updates c.Devices.
+func (c *Config) ReloadTargets() ([]DeviceConfig, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.targetsPath == "" {
+		return c.Devices, nil
+	}
+
+	if _, err := os.Stat(c.targetsPath); err != nil {
+		return c.Devices, nil
+	}
+
+	targets, err := LoadTargetsFile(c.targetsPath)
+	if err != nil {
+		return nil, err
+	}
+
+	backup := c.Devices
+	c.Devices = targets
+	if err := c.validateLocked(); err != nil {
+		c.Devices = backup
+		return nil, err
+	}
+
+	result := make([]DeviceConfig, len(c.Devices))
+	copy(result, c.Devices)
+	return result, nil
+}
+
+// SaveTargets atomically writes the registered devices strictly to targets.yaml.
+func (c *Config) SaveTargets() error {
+	c.mu.RLock()
+	path := c.targetsPath
+	devs := make([]DeviceConfig, len(c.Devices))
+	copy(devs, c.Devices)
+	c.mu.RUnlock()
+
+	if path == "" {
+		path = "./targets.yaml"
+	}
+	return SaveTargetsFile(path, devs)
 }

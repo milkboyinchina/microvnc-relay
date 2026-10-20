@@ -12,8 +12,13 @@ Restart=always
 RestartSec=5s
 
 # Memory Safety & Flash Protection Boundaries (< 35MB Active RSS Budget)
-Environment="GOMEMLIMIT=48MiB" "GOGC=50"
-MemoryMax=128M
+# GOMEMLIMIT is a soft Go-heap ceiling: worst-case RSS ~= non-heap base
+# (~8-10MB binary text + stacks) + limit, so 24MiB keeps RSS under the
+# 35MB contract (48MiB allowed ~13MB of overshoot). MemoryHigh throttles
+# before the MemoryMax hard backstop.
+Environment="GOMEMLIMIT=24MiB" "GOGC=50"
+MemoryHigh=32M
+MemoryMax=48M
 LimitNOFILE=65536
 
 # Sandboxing & System Hardening
@@ -21,6 +26,13 @@ ProtectSystem=full
 ProtectHome=true
 NoNewPrivileges=true
 PrivateTmp=true
+
+# ProtectSystem=full mounts /etc read-only. The relay must write auth.json and
+# targets.yaml there, and its PID file under /run. RuntimeDirectory creates
+# /run/microvnc-relay owned by the service user.
+RuntimeDirectory=microvnc-relay
+RuntimeDirectoryMode=0750
+ReadWritePaths=/etc/microvnc-relay /run/microvnc-relay
 
 # Logging directly to systemd journal (avoids SD card flash wearout)
 StandardOutput=journal

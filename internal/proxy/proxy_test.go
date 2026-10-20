@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -86,7 +88,7 @@ func TestMode1ManagerEndToEndAndReload(t *testing.T) {
 	if err := m1.Start(); err != nil {
 		t.Fatalf("Mode1Manager.Start failed: %v", err)
 	}
-	defer m1.Stop()
+	defer m1.Stop(context.Background())
 
 	listenAddr := m1.ListenerAddr("pi-signage-01")
 	if listenAddr == "" {
@@ -121,16 +123,35 @@ func TestMode1ManagerEndToEndAndReload(t *testing.T) {
 		t.Fatal("echoed payload mismatch")
 	}
 
-	// Verify active session metrics
-	sessions := meter.GetSessions()
-	if len(sessions) != 1 {
-		t.Fatalf("expected 1 active session, got %d", len(sessions))
+	// Verify active session metrics. Byte counters are published immediately
+	// after the corresponding socket write, so give the forwarding goroutine a
+	// brief window to account for the final chunk before snapshotting.
+	var session SessionSnapshot
+	expectedRx := uint64(len(payload))
+	expectedTx := uint64(12 + len(payload))
+	metricDeadline := time.Now().Add(2 * time.Second)
+	for {
+		sessions := meter.GetSessions()
+		if len(sessions) == 1 {
+			session = sessions[0]
+			if session.RxBytesTotal == expectedRx && session.TxBytesTotal == expectedTx {
+				break
+			}
+		}
+		if time.Now().After(metricDeadline) {
+			if len(sessions) != 1 {
+				t.Fatalf("expected 1 active session, got %d", len(sessions))
+			}
+			session = sessions[0]
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if sessions[0].RxBytesTotal != uint64(len(payload)) {
-		t.Errorf("expected RxBytesTotal=%d, got %d", len(payload), sessions[0].RxBytesTotal)
+	if session.RxBytesTotal != expectedRx {
+		t.Errorf("expected RxBytesTotal=%d, got %d", expectedRx, session.RxBytesTotal)
 	}
-	if sessions[0].TxBytesTotal != uint64(12+len(payload)) {
-		t.Errorf("expected TxBytesTotal=%d, got %d", 12+len(payload), sessions[0].TxBytesTotal)
+	if session.TxBytesTotal != expectedTx {
+		t.Errorf("expected TxBytesTotal=%d, got %d", expectedTx, session.TxBytesTotal)
 	}
 
 	// Test dynamic Reload: add second device and remove first device
@@ -155,7 +176,7 @@ func TestMode1ManagerEndToEndAndReload(t *testing.T) {
 	}
 
 	// Force disconnect active session via TrafficMeter
-	if !meter.DisconnectSession(sessions[0].SessionID) {
+	if !meter.DisconnectSession(session.SessionID) {
 		t.Error("expected DisconnectSession to return true")
 	}
 
@@ -201,7 +222,7 @@ func TestMode1CIDRRejection(t *testing.T) {
 	if err := m1.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer m1.Stop()
+	defer m1.Stop(context.Background())
 
 	conn, err := net.DialTimeout("tcp", m1.ListenerAddr("restricted-dev"), 2*time.Second)
 	if err != nil {
@@ -244,7 +265,7 @@ func TestMode2UltraVNCMatchmaker(t *testing.T) {
 	if err := m2.Start(); err != nil {
 		t.Fatalf("Mode2Manager.Start: %v", err)
 	}
-	defer m2.Stop()
+	defer m2.Stop(context.Background())
 
 	// 1. Connect synthetic reverse VNC server to Mode2ReversePort sending 250-byte null-padded "ID:1234"
 	revConn, err := net.DialTimeout("tcp", m2.ReverseAddr(), 2*time.Second)
@@ -387,5 +408,203 @@ func TestForwardStreamQoSAndIdleTimeout(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("expected ForwardStream to close after 1s IdleTimeoutSec")
+	}
+}
+
+func TestMode1PortCollisionTracking(t *testing.T) {
+	// Occupy a port externally to simulate EADDRINUSE
+	externalLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to bind external port: %v", err)
+	}
+	defer externalLn.Close()
+	occupiedPort := externalLn.Addr().(*net.TCPAddr).Port
+
+	freePort := getFreePort(t)
+
+	cfg := config.DefaultConfig()
+	cfg.Server.VNCBind = "127.0.0.1"
+	cfg.Devices = []config.DeviceConfig{
+		{
+			ID:          "collision-dev",
+			Name:        "Collision Target",
+			Host:        "127.0.0.1",
+			Port:        5900,
+			VirtualPort: occupiedPort,
+			Enabled:     true,
+		},
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	m1 := NewMode1Manager(cfg, nil, log)
+	defer m1.Stop(context.Background())
+
+	// Start should return an error and record the bind error for "collision-dev"
+	if err := m1.Start(); err == nil {
+		t.Fatalf("expected Start to return bind error for occupied port %d", occupiedPort)
+	}
+
+	bindErrs := m1.GetBindErrors()
+	if bindErrs["collision-dev"] == "" {
+		t.Fatalf("expected bind error recorded for 'collision-dev', got: %+v", bindErrs)
+	}
+
+	// Reconfigure to a free port and reload -> bind error must be cleared
+	cfg.Devices[0].VirtualPort = freePort
+	if err := m1.Reload(cfg.Devices); err != nil {
+		t.Fatalf("Reload on free port failed: %v", err)
+	}
+
+	bindErrsAfter := m1.GetBindErrors()
+	if len(bindErrsAfter) != 0 {
+		t.Fatalf("expected bind errors cleared after resolving port collision, got: %+v", bindErrsAfter)
+	}
+}
+
+func TestMode1AdmissionCapRejectsSecondSession(t *testing.T) {
+	targetPort, stopTarget := startMockRFBServer(t)
+	defer stopTarget()
+
+	virtualPort := getFreePort(t)
+	cfg := config.DefaultConfig()
+	cfg.Server.VNCBind = "127.0.0.1"
+	cfg.Features.Mode1Enabled = true
+	cfg.ConnectionLimits.MaxTotalSessions = 10
+	cfg.ConnectionLimits.MaxSessionsPerDevice = 1
+	cfg.Devices = []config.DeviceConfig{{
+		ID:          "capped-device",
+		Host:        "127.0.0.1",
+		Port:        targetPort,
+		VirtualPort: virtualPort,
+		Enabled:     true,
+	}}
+
+	meter := NewTrafficMeter(false)
+	admission := NewAdmissionController(cfg.ConnectionLimits)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	m1 := NewMode1Manager(cfg, meter, log)
+	m1.SetAdmissionController(admission)
+	if err := m1.Start(); err != nil {
+		t.Fatalf("Mode1Manager.Start: %v", err)
+	}
+	defer m1.Stop(context.Background())
+
+	addr := m1.ListenerAddr("capped-device")
+	if addr == "" {
+		t.Fatal("expected a bound Mode 1 listener")
+	}
+
+	first, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial first session: %v", err)
+	}
+	defer first.Close()
+
+	// The target greeting is forwarded only after the session is registered.
+	greeting := make([]byte, 12)
+	if _, err := io.ReadFull(first, greeting); err != nil {
+		t.Fatalf("read first session greeting: %v", err)
+	}
+
+	second, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial second session: %v", err)
+	}
+	defer second.Close()
+
+	_ = second.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var one [1]byte
+	if _, err := second.Read(one[:]); err == nil {
+		t.Fatal("expected the second session to be rejected by the per-device cap")
+	}
+
+	snap := admission.Snapshot()
+	if snap.RejectedPerDevice != 1 {
+		t.Fatalf("expected one per-device rejection, got %d", snap.RejectedPerDevice)
+	}
+	if snap.TotalSessions != 1 {
+		t.Fatalf("expected one active admission slot, got %d", snap.TotalSessions)
+	}
+}
+
+func TestForwardStreamHalfCloseDrainsOppositeDirection(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	serverConnCh := make(chan net.Conn, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err == nil {
+			serverConnCh <- conn
+		}
+	}()
+
+	clientConn, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer clientConn.Close()
+
+	var serverConn net.Conn
+	select {
+	case serverConn = <-serverConnCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out accepting server conn")
+	}
+	defer serverConn.Close()
+
+	limits := config.DefaultConfig().ConnectionLimits
+	limits.HalfCloseTimeoutSec = 2
+
+	forwardDone := make(chan struct{})
+	go func() {
+		ForwardStream(clientConn, serverConn, nil, limits, false)
+		close(forwardDone)
+	}()
+
+	if _, err := clientConn.Write([]byte("ping")); err != nil {
+		t.Fatalf("client write: %v", err)
+	}
+	if err := clientConn.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatalf("client CloseWrite: %v", err)
+	}
+
+	ping := make([]byte, 4)
+	if _, err := io.ReadFull(serverConn, ping); err != nil {
+		t.Fatalf("server read ping: %v", err)
+	}
+	if string(ping) != "ping" {
+		t.Fatalf("server got %q, want ping", ping)
+	}
+
+	// The forwarder must propagate the client's half-close as EOF.
+	eofBuf := make([]byte, 1)
+	if _, err := serverConn.Read(eofBuf); !errors.Is(err, io.EOF) {
+		t.Fatalf("server expected EOF after client half-close, got %v", err)
+	}
+
+	if _, err := serverConn.Write([]byte("pong")); err != nil {
+		t.Fatalf("server write pong: %v", err)
+	}
+	if err := serverConn.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatalf("server CloseWrite: %v", err)
+	}
+
+	pong := make([]byte, 4)
+	_ = clientConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := io.ReadFull(clientConn, pong); err != nil {
+		t.Fatalf("client read pong: %v", err)
+	}
+	if string(pong) != "pong" {
+		t.Fatalf("client got %q, want pong", pong)
+	}
+
+	select {
+	case <-forwardDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("ForwardStream did not finish after both directions closed")
 	}
 }

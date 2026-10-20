@@ -21,7 +21,9 @@ web/node_modules/
 # Logs and runtime config
 *.log
 /config.yaml
+/targets.yaml
 /auth.json
+*.pid
 
 # OS and Editor files
 .DS_Store
@@ -37,3 +39,7 @@ GEMINI.md
 .agents/
 .agent/
 
+
+# Local soak artifacts
+/soak-*.csv
+/soak-run.pid

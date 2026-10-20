@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"sync"
@@ -204,6 +205,7 @@ type TrafficMeter struct {
 	tickCount     int
 	history24h    *telemetry.RingBuffer[BandwidthBucket]
 	mu            sync.RWMutex
+	shuttingDown  atomic.Bool
 	sessions      map[string]*Session
 }
 
@@ -238,10 +240,77 @@ func (tm *TrafficMeter) RegisterSession(deviceID, deviceName, mode, clientAddr, 
 	}
 
 	tm.mu.Lock()
+	if tm.shuttingDown.Load() {
+		tm.mu.Unlock()
+		return nil
+	}
 	tm.sessions[id] = sess
 	tm.mu.Unlock()
 
 	return sess
+}
+
+// BeginShutdown stops admitting new sessions. Existing sessions remain until
+// Shutdown or an explicit disconnect.
+func (tm *TrafficMeter) BeginShutdown() {
+	tm.mu.Lock()
+	tm.shuttingDown.Store(true)
+	tm.mu.Unlock()
+}
+
+// ShuttingDown reports whether the registry has stopped admitting sessions.
+func (tm *TrafficMeter) ShuttingDown() bool {
+	return tm.shuttingDown.Load()
+}
+
+// ActiveSessionCount returns the number of currently registered sessions.
+func (tm *TrafficMeter) ActiveSessionCount() int {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return len(tm.sessions)
+}
+
+// Shutdown stops admission, disconnects every active session, and waits up to
+// ctx for the registry to drain. It returns the IDs still pending on timeout.
+func (tm *TrafficMeter) Shutdown(ctx context.Context) ([]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	tm.BeginShutdown()
+
+	tm.mu.RLock()
+	sessions := make([]*Session, 0, len(tm.sessions))
+	for _, s := range tm.sessions {
+		sessions = append(sessions, s)
+	}
+	tm.mu.RUnlock()
+
+	for _, s := range sessions {
+		s.Disconnect()
+	}
+
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		tm.mu.RLock()
+		if len(tm.sessions) == 0 {
+			tm.mu.RUnlock()
+			return nil, nil
+		}
+		remaining := make([]string, 0, len(tm.sessions))
+		for id := range tm.sessions {
+			remaining = append(remaining, id)
+		}
+		tm.mu.RUnlock()
+
+		select {
+		case <-ctx.Done():
+			return remaining, fmt.Errorf("shutdown timed out with %d active session(s): %w", len(remaining), ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 // UnregisterSession removes a completed session from the active registry.

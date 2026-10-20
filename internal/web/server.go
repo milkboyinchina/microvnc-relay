@@ -46,6 +46,7 @@ func NewServer(
 ) (*Server, error) {
 	auth := NewAuthManager(cfg, configPath)
 	wsHub := NewWSHub()
+	wsHub.SetMaxClients(cfg.ConnectionLimits.MaxWSClients)
 
 	api := NewAPIHandler(
 		cfg,
@@ -77,7 +78,15 @@ func NewServer(
 		Addr:              cfg.Server.WebBind,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 * 1024,
+		ConnState: func(conn net.Conn, state http.ConnState) {
+			if state == http.StateNew {
+				proxy.ConfigureTCPConn(conn, cfg.ConnectionLimits.TCPKeepAliveSec, cfg.ConnectionLimits.TCPUserTimeoutSec)
+			}
+		},
 	}
 
 	return &Server{
@@ -89,6 +98,21 @@ func NewServer(
 		wsHub:      wsHub,
 		stopCh:     make(chan struct{}),
 	}, nil
+}
+
+// SetBindErrorsGetter attaches a callback to inspect Mode 1 virtual port bind collisions.
+func (s *Server) SetBindErrorsGetter(fn func() map[string]string) {
+	if s.api != nil {
+		s.api.bindErrorsGetter = fn
+	}
+}
+
+// SetAdmissionController attaches the shared session admission controller so
+// metrics can report cap pressure and rejection counters.
+func (s *Server) SetAdmissionController(admission *proxy.AdmissionController) {
+	if s.api != nil {
+		s.api.SetAdmissionController(admission)
+	}
 }
 
 // Start opens the HTTP listener and starts the 1Hz WebSocket telemetry broadcaster.

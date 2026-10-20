@@ -1,0 +1,186 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-armv6
+            goos: linux
+            goarch: arm
+            goarm: "6"
+          - name: linux-armv7
+            goos: linux
+            goarch: arm
+            goarm: "7"
+          - name: linux-arm64
+            goos: linux
+            goarch: arm64
+            goarm: ""
+          - name: linux-amd64
+            goos: linux
+            goarch: amd64
+            goarm: ""
+          - name: windows-amd64
+            goos: windows
+            goarch: amd64
+            goarm: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        run: go build ./...
+
+  test:
+    name: test + race + vet
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+      - name: Test (race)
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race ./...
+
+  dev-build:
+    name: dev-tagged build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build with dev bridge
+        env:
+          CGO_ENABLED: "0"
+        run: go build -tags dev ./cmd/microvnc-relay
+
+      - name: Cross-build armv7 with dev bridge
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: arm
+          GOARM: "7"
+        run: go build -tags dev ./cmd/microvnc-relay ./cmd/synthetic-vnc
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: Scan
+        run: govulncheck ./...
+
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: FuzzConfigYAML
+            package: ./internal/config
+          - target: FuzzTargetsYAML
+            package: ./internal/config
+          - target: FuzzParseMode2ID
+            package: ./internal/proxy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Fuzz
+        run: go test ${{ matrix.package }} -run=^$ -fuzz=^${{ matrix.target }}$ -fuzztime=30s
+
+  arm-test:
+    name: arm32 tests (QEMU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+      - name: Test linux/arm/v7
+        run: |
+          docker run --rm --platform linux/arm/v7 \
+            -v "$PWD:/src" -w /src \
+            -e CGO_ENABLED=0 \
+            golang:1.26 go test ./...
+      - name: Test GOARM=6 codegen (runs on armv7 under QEMU)
+        run: |
+          docker run --rm --platform linux/arm/v7 \
+            -v "$PWD:/src" -w /src \
+            -e CGO_ENABLED=0 -e GOARM=6 \
+            golang:1.26 go test ./...
+
+  compose-smoke:
+    name: dev data-plane compose
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify Docker Compose
+        run: docker compose version
+      - name: Run Gate 0 data-plane scenarios
+        run: bash scripts/gate0-compose.sh
+
+  arm64-race:
+    name: arm64 race (best effort)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - name: Test linux/arm64 with race detector
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v "$PWD:/src" -w /src \
+            -e CGO_ENABLED=1 \
+            golang:1.26 go test -race ./...

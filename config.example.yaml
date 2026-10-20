@@ -43,6 +43,12 @@ features:
 # Network & Listener Bindings
 # ==============================================================================
 server:
+  # Dedicated file for target definitions (defaults to "targets.yaml" in same dir)
+  # Keeping targets in targets.yaml allows modifying devices via WebUI or CLI
+  # without ever touching or risking corruption of your daemon config.
+  # Reload targets on the fly: microvnc-relay --reload (or systemctl reload)
+  targets_file: "targets.yaml"
+
   # WebUI & API listener (Ignored if features.webui_enabled is false)
   # Bind to "0.0.0.0:8080" for all interfaces, or NetBird IP (e.g. "100.64.0.1:8080")
   # NetBird relay recipe: use the wt0 address only so the dashboard never hits WAN.
@@ -62,14 +68,22 @@ server:
 # Authentication & Security
 # ==============================================================================
 security:
-  # Protect WebUI with session password authentication (Recommended: true)
+  # Protect WebUI with session authentication (Recommended: true)
+  # On first launch with auth_enabled: true, the relay prints a one-time setup
+  # token to stdout/journal. The WebUI setup form requires that token before it
+  # will create administrator credentials (bcrypt, written to auth.json).
+  # Read it with: journalctl -u microvnc-relay | docker logs <container>
+  # To reset: stop the service, delete auth.json, start the service, and use the
+  # newly printed token. There is no default username or password.
   auth_enabled: true
-  username: "admin"
-  # Default password: "admin" (BCrypt hash). Change on first startup!
-  password_hash: "$2a$12$e8N4O1.UqMh0z7e5k8aE1.9JgU6P8f2K4r3B1t0y9u8i7o6p5q4w3"
-  
+
   # Session timeout in minutes
   session_timeout_minutes: 1440
+
+  # Set the Secure attribute on session cookies. Enable when the WebUI is
+  # reached over HTTPS (reverse proxy or overlay TLS); leave false for
+  # plain-HTTP overlay/localhost deployments.
+  secure_cookies: false
 
 # ==============================================================================
 # Access Control & Subnet Whitelist
@@ -89,8 +103,12 @@ access_control:
 # Connection Timeouts & QoS Bandwidth Limits
 # ==============================================================================
 connection_limits:
-  # TCP keepalive interval to detect and terminate zombie/dropped connections
-  tcp_keepalive_sec: 30
+  # TCP keepalive interval/idle period to detect and terminate zombie links
+  tcp_keepalive_sec: 15
+
+  # Linux TCP_USER_TIMEOUT: how long unacknowledged data may remain before the
+  # kernel fails the connection. Prevents dead peers from holding FDs forever.
+  tcp_user_timeout_sec: 30
 
   # Connect timeout when probing or establishing link to target TCP servers
   dial_timeout_sec: 5
@@ -100,11 +118,29 @@ connection_limits:
   # clients are disconnected after this deadline. Requires full restart.
   mode2_handshake_timeout_sec: 5
 
+  # How long a viewer that requested an ID waits for a reverse server to dial
+  # in before being disconnected. Bounded by max_pending_handshakes.
+  mode2_viewer_wait_timeout_sec: 10
+
   # Idle timeout in seconds before closing inactive client sockets (0 = disabled)
   idle_timeout_sec: 0
 
+  # After one direction reaches EOF, close its write side and wait this long for
+  # the other direction to finish before force-closing both sockets.
+  half_close_timeout_sec: 5
+
   # Optional per-session bandwidth cap in KB/s to prevent network choking (0 = unlimited)
+  # NOTE: enabling QoS forces the userspace pacing path for that stream; the
+  # kernel splice(2) fast path is not used while a bandwidth cap is active.
   max_session_kbps: 0
+
+  # Hard admission caps. These bound memory and FDs; sync.Pool is reuse, not a
+  # cap. 0 means "use the default", never "unlimited". Raising these values
+  # invalidates the <35MB rated-load claim until re-measured.
+  max_total_sessions: 32          # all Mode 1 + Mode 2 sessions
+  max_sessions_per_device: 8      # one target cannot consume every slot
+  max_pending_handshakes: 64      # accepted-but-unauthenticated sockets
+  max_ws_clients: 8               # telemetry WebSocket clients (oldest evicted)
 
 # ==============================================================================
 # Logging & Storage (Flash Wear Protection)
@@ -130,6 +166,11 @@ telemetry:
 
 # ==============================================================================
 # Registered Targets (VNC or generic TCP)
+# NOTE: In the dual-file configuration, targets are loaded from `targets.yaml`
+# (see `targets.example.yaml`). When targets.yaml exists, it takes precedence.
+# The inline `devices:` block below is preserved for backward compatibility
+# and single-file deployments.
+#
 # Mode 1: virtual_port -> host:port works for any TCP (VNC 5900, RDP 3389,
 # SSH 22, SMB 445/tcp). mode2_id / vnc_server_type are VNC-only.
 # TCP-only: no UDP, no load balancing (1:1 mapping), no TLS termination.

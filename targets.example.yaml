@@ -1,0 +1,43 @@
+# ==============================================================================
+# μVNC Relay Registered Targets (targets.yaml)
+# Mode 1 is generic TCP (VNC 5900, RDP 3389, SSH 22, SMB 445/tcp, HTTP 80).
+# Mode 2 (UltraVNC ID reverse matchmaker) is VNC-only.
+#
+# Reload on the fly without restarting or dropping active streams:
+#   microvnc-relay --reload
+# or:
+#   systemctl reload microvnc-relay
+# ==============================================================================
+
+targets:
+  - id: "pi2-lab"
+    name: "Raspberry Pi 2 (Workbench)"
+    host: "192.168.1.50"
+    port: 5900
+    virtual_port: 5910      # Clients connect via <relay-ip>:5910
+    mode2_id: 1234          # Optional UltraVNC Mode 2 ID
+    vnc_server_type: "x11vnc"
+    enabled: true
+
+  - id: "armbian-tvbox"
+    name: "Orange Pi / Armbian Box"
+    host: "192.168.1.51"
+    port: 5901
+    virtual_port: 5911      # Clients connect via <relay-ip>:5911
+    mode2_id: 1235
+    vnc_server_type: "tightvnc"
+    enabled: true
+
+  - id: "desktop-pc"
+    name: "Workstation Main Desktop"
+    host: "192.168.1.52"
+    port: 5900
+    virtual_port: 5912
+    vnc_server_type: "realvnc"
+    enabled: true
+
+  # Pure Mode 2 reverse target (behind remote NAT, no direct host:port needed):
+  # - id: "field-laptop"
+  #   name: "Field Technician Laptop"
+  #   mode2_id: 5555
+  #   enabled: true
