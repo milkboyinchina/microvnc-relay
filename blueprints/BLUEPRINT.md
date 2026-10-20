@@ -75,12 +75,14 @@ The project is organized into **4 incremental phases plus a Gate 0 hardening pas
   - [x] **Probe Hygiene (`internal/telemetry/pinger.go`)**: `SO_LINGER 0` on probe sockets (TIME_WAIT accumulation); jittered per-host probe cadence (x11vnc/RealVNC rate-limit high-churn sources — the prober can get the relay banned).
   - [x] **Installer Sysctls (`scripts/install-systemd.sh`)**: apply `net.ipv4.tcp_mtu_probing=1`; machine-id regeneration step for cloned SD images.
   - [x] **CI Forward-Pull (was Phase 4)**: per-commit `GOARM=6`/`GOARM=7` cross-compile checks, `-race` on amd64/arm64, `govulncheck`, `goleak`, YAML/import parser fuzzing.
-  - Physical ARMv6 soak: **deferred** — pending hardware (Pi 1/Zero not provisioned). Cross-compile verified; soak not run.
+  - Physical ARMv6 soak: **deferred** — pending hardware (Pi 1/Zero not provisioned). Cross-compile verified.
+  - Smoke test: GOARM=6 binary ran on Pi 2 (ARMv7) without SIGILL; RSS 7,968 KB. Not a full soak.
   - [x] **Docker Daisy-Chain Test Harness (dev-only — audit)**: `docker compose` multi-hop topology (Hub ➔ Site DMZ ➔ Floor Pi relays + synthetic VNC targets) using **dev-tagged** builds (synthetic targets + fault injection exist only under `//go:build dev` — production images never ship them). Each container binds the real per-hop ports (`:5910`/`:8080`) in its own netns — port parity with the physical fleet. Data-plane scenarios shipped in Gate 0: direct, multi-hop `A ➔ B ➔ C`, `A ➔ B ➔ A` loops, abrupt disconnect, RST vs drop, and `tc netem` on the Site DMZ interface. Chain-control-plane scenarios (chain drift, duplicate `relay_id`, identity persistence across recreate, version skew/`api_version`, SSRF/inspect boundary) land with Phase 2a/b/c because those features do not exist yet. Container-to-container bridge traffic preserves real source IPs (published-port tests hit the Docker userland-proxy RST caveat). Runs on amd64 CI as an integration tier — **not** a resource-envelope test (physical ARMv6 soak remains mandatory). Production containerization (multi-arch release image, `uvnc:uvnc`, read-only rootfs, NetBird sidecar) stays in Phase 4.
 - **Gate 0 Exit Condition**: no unbounded control paths; reliable persistence & activation; tested failure recovery; the working tree committed & pushed so the spec, the published repo, and future audits agree.
 
 > **Hardware verification backlog (Gate 0, deferred)**:
-> - **Pi 1/Zero (ARMv6)** soak: deferred pending hardware provisioning. Cross-compile verified; physical soak not run.
+> - **Pi 1/Zero (ARMv6)** soak: deferred pending hardware provisioning. Cross-compile verified.
+>   - **Smoke test (substitute)**: GOARM=6 binary ran on Pi 2 (ARMv7) without SIGILL — RSS 7,968 KB, 20 concurrent streams, no crash. Not a substitute for a 24h soak on 256 MB hardware; memory envelope on Pi 1/Zero remains unverified.
 > - **Systemd sandbox**: tested on Pi 2 (unit active, MemoryHigh=32M/MemoryMax=48M, but memory cgroup **not mounted** on this Pi OS image — limits inert; FDs 10, RSS 7,808 KB). Not tested on a non-Pi systemd host.
 > - **Rated-load RSS**: measured on Pi 2 — 32 streams × 64 KB, max RSS 8,092 KB, well under 35 MB. Not yet measured on Pi 1/Zero.
 > - **Memory cgroup**: not available on this Pi OS image; GOMEMLIMIT=24MiB and GOGC=50 remain the primary RSS controls.
