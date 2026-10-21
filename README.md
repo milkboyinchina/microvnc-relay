@@ -233,9 +233,11 @@ To ensure this daemon remains under 35MB RSS and never wears out MicroSD flash s
 
 ## Hardware Targets
 
+> **ARMv6 status (Raspberry Pi 1 / Zero)**: The `GOARM=6` binary cross-compiles, passes the QEMU `linux/arm/v7` + `GOARM=6` test suite, and starts on a Raspberry Pi 2 (ARMv7) without `SIGILL`. A physical 24h soak and a 256MB memory-envelope measurement on a real Pi 1/Zero are still **deferred**. It is expected to work on Pi 1 hardware, but that is not yet physically verified.
+
 | Platform | Architecture | System RAM | Process Budget | Measured RSS |
 |---|---|---|---|---|
-| **Raspberry Pi 1 (A/B/B+) & Pi Zero / Zero W** | ARMv6 (`armv6l` / `armhf`, `GOARM=6`) | 256MB – 512MB | < 25 MB | **~8.5 MB** |
+| **Raspberry Pi 1 (A/B/B+) & Pi Zero / Zero W** | ARMv6 (`armv6l` / `armhf`, `GOARM=6`) | 256MB – 512MB | < 25 MB | **Not yet measured** (build + QEMU verified; physical soak pending) |
 | **Raspberry Pi 2 / Orange Pi Zero LTS** | ARMv7 (`armv7l`, `GOARM=7`) | 256MB – 512MB | < 30 MB | **~8.9 MB** |
 | **Armbian TV Boxes** | ARMv7 / ARM64 | 512MB – 1GB | < 35 MB | **~9.5 MB** |
 | **Raspberry Pi 3/4/5** | ARM64 (`aarch64`) | 1GB – 8GB | < 35 MB | **~9.7 MB** |
