@@ -144,18 +144,35 @@ jobs:
       - uses: docker/setup-qemu-action@v3
         with:
           platforms: arm
+      # The golang container starts with an empty module/build cache. Without a
+      # persistent mount, every docker run re-downloads modules and a flaky
+      # proxy connection can stall the job past its timeout. Prime once, then
+      # reuse the same host caches for both test steps.
+      - name: Prime Go module/build cache (arm)
+        run: |
+          mkdir -p "$RUNNER_TEMP/go-mod" "$RUNNER_TEMP/go-build"
+          timeout 5m docker run --rm --platform linux/arm/v7 \
+            -v "$PWD:/src" -w /src \
+            -v "$RUNNER_TEMP/go-mod:/go/pkg/mod" \
+            -v "$RUNNER_TEMP/go-build:/root/.cache/go-build" \
+            -e CGO_ENABLED=0 \
+            golang:1.26 go mod download
       - name: Test linux/arm/v7
         run: |
-          docker run --rm --platform linux/arm/v7 \
+          timeout 10m docker run --rm --platform linux/arm/v7 \
             -v "$PWD:/src" -w /src \
+            -v "$RUNNER_TEMP/go-mod:/go/pkg/mod" \
+            -v "$RUNNER_TEMP/go-build:/root/.cache/go-build" \
             -e CGO_ENABLED=0 \
-            golang:1.26 go test ./...
+            golang:1.26 go test -count=1 ./...
       - name: Test GOARM=6 codegen (runs on armv7 under QEMU)
         run: |
-          docker run --rm --platform linux/arm/v7 \
+          timeout 10m docker run --rm --platform linux/arm/v7 \
             -v "$PWD:/src" -w /src \
+            -v "$RUNNER_TEMP/go-mod:/go/pkg/mod" \
+            -v "$RUNNER_TEMP/go-build:/root/.cache/go-build" \
             -e CGO_ENABLED=0 -e GOARM=6 \
-            golang:1.26 go test ./...
+            golang:1.26 go test -count=1 ./...
 
   compose-smoke:
     name: dev data-plane compose
