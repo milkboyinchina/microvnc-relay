@@ -1,6 +1,6 @@
 module github.com/milkboyinchina/microvnc-relay
 
-go 1.26.9
+go 1.26.10
 
 require (
 	go.uber.org/goleak v1.3.0

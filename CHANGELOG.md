@@ -37,7 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `scripts/soak.sh` and `scripts/verify-pi2.sh` collect RSS, cgroup memory, Slab, FDs, goroutines, disk writes, HTTP reachability, and heartbeat latency. `scripts/soak.sh` now records git commit, Go version, stress-binary SHA-256, the exact command line, and per-stage ok/err/tx counters.
 
 #### Changed
-- Go directive bumped to `1.26.9` after `govulncheck` found callable standard-library vulnerabilities in 1.26.0.
+- Go directive bumped to `1.26.10` after `govulncheck` found a callable standard-library `x509.Certificate.Verify` vulnerability in the 1.26.9 toolchain (and earlier 1.26.0 issues).
 - Default `tcp_keepalive_sec` is now 15; added `tcp_user_timeout_sec` (30) and `half_close_timeout_sec` (5).
 - `max_session_kbps` is documented as the only remaining non-splice forwarding mode.
 - `blueprints/BLUEPRINT.md` Gate 0 code items are marked complete; evidence closure (rated load, systemd, soak provenance, ARMv6 hardware) and chain-control-plane harness scenarios remain tracked as open items. CI is green on `b264112`.
