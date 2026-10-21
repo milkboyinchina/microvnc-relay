@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Gate 0 — Phase 1 Audit Hardening
 
-> **Gate 0 status: code-complete; evidence not yet closed.** The committed 24h soak artifact reports 2,920 stages, max RSS 10,084 KB, and no circuit breaker, but its producing runner has not yet been reconciled with `scripts/soak.sh`. Rated-load RSS (32 streams + 8 WebSocket clients) and the systemd `MemoryHigh=32M`/`MemoryMax=48M` chain remain unverified: no artifact exists, and the deployed unit used `GOMEMLIMIT=48MiB`/`MemoryMax=128M` with the memory cgroup unavailable. The Pi 1/Zero (ARMv6) physical soak is deferred pending hardware; the previous ARMv6 smoke-test RSS/stream numbers are retracted pending a reproducible transcript. The code-level, race, cross-build, and Docker data-plane evidence is in this tree.
+> **Gate 0 status: code-complete; evidence not yet closed.** CI is green on `b264112` (run 39523933011): amd64 test/race/vet, QEMU arm32, GOARM=6 QEMU, all cross-builds, govulncheck, fuzz, and the dev compose harness. The committed 24h soak artifact reports 2,920 stages, max RSS 10,084 KB, and no circuit breaker, but its producing runner has not yet been reconciled with `scripts/soak.sh`. Rated-load RSS (32 streams + 8 WebSocket clients) and the systemd `MemoryHigh=32M`/`MemoryMax=48M` chain remain unverified: no artifact exists, and the deployed unit used `GOMEMLIMIT=48MiB`/`MemoryMax=128M` with the memory cgroup unavailable. The Pi 1/Zero (ARMv6) physical soak is deferred pending hardware; the previous ARMv6 smoke-test RSS/stream numbers are retracted pending a reproducible transcript.
 
 #### Security
 - Token-only first-run setup: a one-time token is printed to stdout/journal; `auth.json` is created with `O_EXCL` and setup is hard-disabled once it exists. No default credentials.
@@ -40,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Go directive bumped to `1.26.9` after `govulncheck` found callable standard-library vulnerabilities in 1.26.0.
 - Default `tcp_keepalive_sec` is now 15; added `tcp_user_timeout_sec` (30) and `half_close_timeout_sec` (5).
 - `max_session_kbps` is documented as the only remaining non-splice forwarding mode.
-- `blueprints/BLUEPRINT.md` Gate 0 code items are marked complete; evidence closure (CI, rated load, systemd, soak provenance) and chain-control-plane harness scenarios remain tracked as open items.
+- `blueprints/BLUEPRINT.md` Gate 0 code items are marked complete; evidence closure (rated load, systemd, soak provenance, ARMv6 hardware) and chain-control-plane harness scenarios remain tracked as open items. CI is green on `b264112`.
 
 #### Fixed
 - `server.targets_file` was documented but silently ignored; now resolved and tested.
