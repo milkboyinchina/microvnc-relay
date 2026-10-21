@@ -54,6 +54,15 @@ func (m *Mode1Manager) SetAdmissionController(admission *AdmissionController) {
 	m.admission = admission
 }
 
+// SetHandshakeSemaphore attaches a process-wide pending-handshake gate. Mode 1
+// and Mode 2 share one semaphore so max_pending_handshakes bounds the whole
+// process, not each listener group independently.
+func (m *Mode1Manager) SetHandshakeSemaphore(sem *Semaphore) {
+	if sem != nil {
+		m.handshakeSem = sem
+	}
+}
+
 // Start opens TCP listeners for all enabled Mode 1 devices in the configuration.
 func (m *Mode1Manager) Start() error {
 	if !m.cfg.Features.Mode1Enabled {

@@ -1,4 +1,4 @@
-// μVNC Relay Modern Dashboard Controller (< 12 KB Pure Vanilla ES6)
+// μVNC Relay Modern Dashboard Controller (pure vanilla ES6; ~11 KB gzipped)
 (() => {
   'use strict';
 

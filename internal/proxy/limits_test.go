@@ -73,6 +73,40 @@ func TestAdmissionControllerPerDeviceCap(t *testing.T) {
 	}
 }
 
+func TestHandshakeSemaphoreSharedByMode1AndMode2(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ConnectionLimits.MaxPendingHandshakes = 1
+	meter := NewTrafficMeter(false)
+
+	m1 := NewMode1Manager(cfg, meter, nil)
+	m2 := NewMode2Manager(cfg, meter, nil)
+
+	shared := NewSemaphore(1)
+	m1.SetHandshakeSemaphore(shared)
+	m2.SetHandshakeSemaphore(shared)
+
+	if m1.handshakeSem != shared {
+		t.Fatal("Mode 1 did not adopt the shared handshake semaphore")
+	}
+	if m2.handshakeSem != shared {
+		t.Fatal("Mode 2 did not adopt the shared handshake semaphore")
+	}
+
+	// A slot taken by one mode must be visible to the other; the configured
+	// cap bounds the process, not each listener group.
+	if !m1.handshakeSem.TryAcquire() {
+		t.Fatal("expected Mode 1 to acquire the shared slot")
+	}
+	if m2.handshakeSem.TryAcquire() {
+		t.Fatal("expected Mode 2 to be rejected while Mode 1 holds the only slot")
+	}
+	m1.handshakeSem.Release()
+	if !m2.handshakeSem.TryAcquire() {
+		t.Fatal("expected Mode 2 to acquire after Mode 1 released")
+	}
+	m2.handshakeSem.Release()
+}
+
 func TestSemaphoreTryAcquireAndRejectedCounter(t *testing.T) {
 	sem := NewSemaphore(1)
 	if !sem.TryAcquire() {

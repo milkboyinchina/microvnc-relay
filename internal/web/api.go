@@ -317,6 +317,7 @@ func (a *APIHandler) handleDevices(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		before := a.cfg.GetDevices()
 		err := a.cfg.ApplyDeviceTransaction(func(devices []config.DeviceConfig) ([]config.DeviceConfig, error) {
 			for _, existing := range devices {
 				if existing.ID == dev.ID {
@@ -331,10 +332,7 @@ func (a *APIHandler) handleDevices(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		var reloadErr error
-		if a.mode1Reloader != nil {
-			reloadErr = a.mode1Reloader(a.cfg.GetDevices())
-		}
+		reloadErr := a.reloadMode1()
 		if a.pinger != nil {
 			a.pinger.TriggerSweep()
 		}
@@ -344,11 +342,24 @@ func (a *APIHandler) handleDevices(w http.ResponseWriter, r *http.Request) {
 		if devBindErr == "" && reloadErr != nil {
 			devBindErr = reloadErr.Error()
 		}
+		if devBindErr != "" {
+			if rbErr := a.rollbackDevices(before); rbErr != nil {
+				slog.Error("failed to roll back device add after activation failure", "device_id", dev.ID, "err", rbErr)
+			}
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"ok":          false,
+				"error":       "device activation failed; change rolled back",
+				"device":      dev,
+				"bind_error":  devBindErr,
+				"bind_errors": a.getBindErrors(),
+			})
+			return
+		}
 
 		writeJSON(w, http.StatusCreated, map[string]any{
 			"ok":          true,
 			"device":      dev,
-			"bind_error":  devBindErr,
+			"bind_error":  "",
 			"bind_errors": bindErrs,
 		})
 
@@ -417,6 +428,7 @@ func (a *APIHandler) handleDeviceByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		before := a.cfg.GetDevices()
 		err := a.cfg.ApplyDeviceTransaction(func(devices []config.DeviceConfig) ([]config.DeviceConfig, error) {
 			for i := range devices {
 				if devices[i].ID == id {
@@ -432,10 +444,7 @@ func (a *APIHandler) handleDeviceByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		var reloadErr error
-		if a.mode1Reloader != nil {
-			reloadErr = a.mode1Reloader(a.cfg.GetDevices())
-		}
+		reloadErr := a.reloadMode1()
 		if a.pinger != nil {
 			a.pinger.TriggerSweep()
 		}
@@ -445,15 +454,29 @@ func (a *APIHandler) handleDeviceByID(w http.ResponseWriter, r *http.Request) {
 		if devBindErr == "" && reloadErr != nil {
 			devBindErr = reloadErr.Error()
 		}
+		if devBindErr != "" {
+			if rbErr := a.rollbackDevices(before); rbErr != nil {
+				slog.Error("failed to roll back device update after activation failure", "device_id", dev.ID, "err", rbErr)
+			}
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"ok":          false,
+				"error":       "device activation failed; change rolled back",
+				"device":      dev,
+				"bind_error":  devBindErr,
+				"bind_errors": a.getBindErrors(),
+			})
+			return
+		}
 
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":          true,
 			"device":      dev,
-			"bind_error":  devBindErr,
+			"bind_error":  "",
 			"bind_errors": bindErrs,
 		})
 
 	case http.MethodDelete:
+		before := a.cfg.GetDevices()
 		err := a.cfg.ApplyDeviceTransaction(func(devices []config.DeviceConfig) ([]config.DeviceConfig, error) {
 			for i := range devices {
 				if devices[i].ID == id {
@@ -468,8 +491,12 @@ func (a *APIHandler) handleDeviceByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if a.mode1Reloader != nil {
-			_ = a.mode1Reloader(a.cfg.GetDevices())
+		if reloadErr := a.reloadMode1(); reloadErr != nil {
+			if rbErr := a.rollbackDevices(before); rbErr != nil {
+				slog.Error("failed to roll back device delete after activation failure", "device_id", id, "err", rbErr)
+			}
+			writeError(w, http.StatusInternalServerError, "device delete activation failed; change rolled back: "+reloadErr.Error())
+			return
 		}
 		if a.pinger != nil {
 			a.pinger.TriggerSweep()
@@ -645,6 +672,32 @@ func (a *APIHandler) getBindErrors() map[string]string {
 		return a.bindErrorsGetter()
 	}
 	return nil
+}
+
+// reloadMode1 applies the current in-memory device list to the live listeners.
+func (a *APIHandler) reloadMode1() error {
+	if a.mode1Reloader == nil {
+		return nil
+	}
+	return a.mode1Reloader(a.cfg.GetDevices())
+}
+
+// rollbackDevices restores a pre-mutation device snapshot (memory + disk) and
+// reapplies it to the live listeners. Used when activation fails after a
+// successful persist, so the API never reports success for a device that is
+// not actually listening.
+func (a *APIHandler) rollbackDevices(before []config.DeviceConfig) error {
+	snapshot := append([]config.DeviceConfig(nil), before...)
+	err := a.cfg.ApplyDeviceTransaction(func([]config.DeviceConfig) ([]config.DeviceConfig, error) {
+		return snapshot, nil
+	})
+	if err != nil {
+		return err
+	}
+	if a.pinger != nil {
+		a.pinger.TriggerSweep()
+	}
+	return a.reloadMode1()
 }
 
 func (a *APIHandler) findDevice(id string) (config.DeviceConfig, bool) {

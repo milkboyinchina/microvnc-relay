@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Gate 0 — Phase 1 Audit Hardening
 
-> **Gate 0 (Pi 2) complete**: 24h soak passed (2,920 stages, max RSS 10,084 KB, 0 heartbeat failures, no circuit breaker). Rated-load RSS (32 streams) measured at 8,092 KB. Systemd unit tested (active, MemoryHigh=32M/MemoryMax=48M; memory cgroup not mounted on this Pi OS image — limits inert). Pi 1/Zero (ARMv6) soak deferred pending hardware. ARMv6 binary smoke-tested on Pi 2 (ARMv7): no SIGILL, RSS 7,968 KB, 20 concurrent streams. The code-level, race, cross-build, and Docker data-plane evidence is in this tree.
+> **Gate 0 status: code-complete; evidence not yet closed.** The committed 24h soak artifact reports 2,920 stages, max RSS 10,084 KB, and no circuit breaker, but its producing runner has not yet been reconciled with `scripts/soak.sh`. Rated-load RSS (32 streams + 8 WebSocket clients) and the systemd `MemoryHigh=32M`/`MemoryMax=48M` chain remain unverified: no artifact exists, and the deployed unit used `GOMEMLIMIT=48MiB`/`MemoryMax=128M` with the memory cgroup unavailable. The Pi 1/Zero (ARMv6) physical soak is deferred pending hardware; the previous ARMv6 smoke-test RSS/stream numbers are retracted pending a reproducible transcript. The code-level, race, cross-build, and Docker data-plane evidence is in this tree.
 
 #### Security
 - Token-only first-run setup: a one-time token is printed to stdout/journal; `auth.json` is created with `O_EXCL` and setup is hard-disabled once it exists. No default credentials.
@@ -20,13 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Systemd unit can write `auth.json`, `targets.yaml`, and the PID file under `ProtectSystem=full`.
 
 #### Added
-- Transactional device CRUD: validate → atomic persist → commit; failed writes return `500` and roll back in-memory state.
+- Transactional device CRUD: validate → atomic persist → activate; if the new/changed listener cannot bind, the change is rolled back (memory + `targets.yaml`) and the API returns `409` instead of a success with `bind_error`.
 - SIGHUP applies devices, access-control CIDRs, connection limits, and the target probe interval; restart-only changes warn explicitly.
 - Documented `server.targets_file` resolution with legacy top-level fallback.
 - One shared 4-slot probe scheduler with `TriggerSweep`, per-host jitter (±20%), and `SO_LINGER=0` probes.
 - Keepalive (15s) and Linux `TCP_USER_TIMEOUT=30s` on every accepted/dialed socket; EOF-driven `CloseWrite` with a bounded drain.
 - Authoritative session registry: stop admission, disconnect all, drain within a bounded grace period, report stragglers.
-- Hard admission caps: 32 global / 8 per device / 64 pending handshakes / 8 WebSocket clients; overload telemetry.
+- Hard admission caps: 32 global / 8 per device / 64 process-wide pending handshakes (Mode 1, Mode 2 reverse, and Mode 2 viewer share one semaphore) / 8 WebSocket clients; overload telemetry.
 - Mode 2: Accept-time handshake deadlines, bounded pending-viewer queue with timeout, duplicate-ID takeover with `MSG_PEEK`, and single-owner `ack`/`done` pairing.
 - Linux splice-metered forwarding with per-direction 16KB pipes and live byte counters from splice return values; QoS remains the only userspace pacing path.
 - Splice engagement/fallback metrics, admission metrics, and WebSocket rejection metrics.
@@ -34,13 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dev-only Docker harness: Hub → Site DMZ → Floor Pi topology, synthetic VNC targets, RST/drop fault endpoints, direct/chained/abrupt-disconnect/RST/drop/netem/loop scenarios.
 - Installer applies `net.ipv4.tcp_mtu_probing=1`, checks the memory cgroup, and prints the first-run token command.
 - `scripts/prepare-cloned-image.sh` resets machine-id and removes copied credentials/identity state.
-- `scripts/soak.sh` and `scripts/verify-pi2.sh` collect RSS, cgroup memory, Slab, FDs, goroutines, disk writes, and heartbeat data.
+- `scripts/soak.sh` and `scripts/verify-pi2.sh` collect RSS, cgroup memory, Slab, FDs, goroutines, disk writes, HTTP reachability, and heartbeat latency. `scripts/soak.sh` now records git commit, Go version, stress-binary SHA-256, the exact command line, and per-stage ok/err/tx counters.
 
 #### Changed
 - Go directive bumped to `1.26.9` after `govulncheck` found callable standard-library vulnerabilities in 1.26.0.
 - Default `tcp_keepalive_sec` is now 15; added `tcp_user_timeout_sec` (30) and `half_close_timeout_sec` (5).
 - `max_session_kbps` is documented as the only remaining non-splice forwarding mode.
-- `blueprints/BLUEPRINT.md` Gate 0 items are marked complete; chain-control-plane harness scenarios are explicitly deferred to Phase 2a/b/c.
+- `blueprints/BLUEPRINT.md` Gate 0 code items are marked complete; evidence closure (CI, rated load, systemd, soak provenance) and chain-control-plane harness scenarios remain tracked as open items.
 
 #### Fixed
 - `server.targets_file` was documented but silently ignored; now resolved and tested.
@@ -53,6 +53,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Systemd `ProtectSystem=full` made `/etc` read-only, breaking credential and target persistence.
 - `PrivateTmp` hid the `/tmp` PID fallback; the runtime directory is now `/run/microvnc-relay`.
 - A flaky Mode 1 byte-counter test snapshotted before the forwarding goroutine finished.
+- Half-close test flake (`client read pong: EOF`) was a test/relay socket-sharing race: the test now uses separate client/server endpoints so `ForwardStream`'s deferred close cannot discard unread bytes.
+- TCP_INFO RTT test now skips the positive-value assertion when an emulated loopback reports zero RTT (QEMU arm32/arm64), instead of failing the ARM matrix.
+- QEMU arm64 ThreadSanitizer job removed from the required matrix; it aborted with `unsupported VMA range`. arm64 race coverage is tracked on real hardware, while amd64 race remains required.
+- noVNC and topology-map flags now default to `false` and are documented as Phase 3 until the `/ws/vnc/*` bridge and map exist.
+- Compose harness now distinguishes RST from drop via the Site DMZ fault log, requires the A→B→A loop in CI, and bounds loop CPU/RSS.
+- `scripts/soak.sh` now records heartbeat latency and aborts on two consecutive >500ms beats, emits per-stage ok/err/tx counters, holds a 30s stage cadence, and checks end-of-run FDs against baseline.
+- WebSocket frame payload/header buffers now use bounded pools instead of per-frame allocations.
+- Dead duplicate `setupDebugBridge` in `cmd/microvnc-relay` removed; the live dev bridge is `internal/web/debug_dev.go`.
 
 ### Added
 - Milestone 1 scaffolding: Go module `github.com/milkboyinchina/microvnc-relay` with pure-Go dependencies (`gopkg.in/yaml.v3`, `golang.org/x/crypto`, `golang.org/x/sys`).

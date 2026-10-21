@@ -128,9 +128,12 @@ type DeviceMutation func([]DeviceConfig) ([]DeviceConfig, error)
 func DefaultConfig() *Config {
 	return &Config{
 		Features: FeaturesConfig{
-			WebUIEnabled:             true,
-			TopologyMapEnabled:       true,
-			NoVNCEnabled:             true,
+			WebUIEnabled: true,
+			// Reserved for Phase 3. Keep these false until the topology map and
+			// /ws/vnc/* bridge actually exist; a default-true no-op flag
+			// misleads operators (Gate 0 audit F8).
+			TopologyMapEnabled:       false,
+			NoVNCEnabled:             false,
 			Mode1Enabled:             true,
 			Mode2Enabled:             true,
 			LatencyProbesEnabled:     true,

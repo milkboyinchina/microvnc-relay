@@ -131,16 +131,27 @@ curl -sf "$DMZ_API/debug/fault/rst?on=1" >/dev/null
 python3 - 15911 <<'PY'
 import socket, sys
 port = int(sys.argv[1])
+s = socket.create_connection(("127.0.0.1", port), 2)
+s.settimeout(2)
 try:
-    s = socket.create_connection(("127.0.0.1", port), 2)
-    s.settimeout(2)
     data = s.recv(1)
-    s.close()
-    assert data == b"", data
+except ConnectionResetError:
+    print("OK rst (viewer saw ECONNRESET)")
 except OSError:
-    pass
-print("OK rst")
+    print("OK rst (viewer saw downstream failure)")
+else:
+    assert data == b"", data
+    print("OK rst (viewer saw EOF after downstream RST)")
+finally:
+    s.close()
 PY
+# The injected fault is visible in the Site DMZ log even when the upstream
+# relay translates it into a clean viewer-side EOF. This distinguishes RST from
+# the drop fault below, which uses a different log line.
+if ! docker compose -f "$COMPOSE_FILE" logs --since=2m site-dmz 2>/dev/null | grep -q "fault injection: resetting client"; then
+    echo "Error: Site DMZ did not log the RST fault injection" >&2
+    exit 1
+fi
 curl -sf "$DMZ_API/debug/fault/rst?on=0" >/dev/null
 
 echo "==> Scenario: injected drop at Site DMZ"
@@ -150,11 +161,19 @@ import socket, sys
 port = int(sys.argv[1])
 s = socket.create_connection(("127.0.0.1", port), 2)
 s.settimeout(3)
-data = s.recv(1)
-s.close()
+try:
+    data = s.recv(1)
+except socket.timeout:
+    raise AssertionError("expected graceful FIN/EOF for drop fault, got timeout")
+finally:
+    s.close()
 assert data == b"", data
-print("OK drop")
+print("OK drop (FIN/EOF, distinct from RST)")
 PY
+if ! docker compose -f "$COMPOSE_FILE" logs --since=2m site-dmz 2>/dev/null | grep -q "fault injection: dropping client"; then
+    echo "Error: Site DMZ did not log the drop fault injection" >&2
+    exit 1
+fi
 curl -sf "$DMZ_API/debug/fault/drop?on=0" >/dev/null
 
 if [[ "${GATE0_WITH_NETEM:-0}" == "1" ]]; then
@@ -207,6 +226,27 @@ while time.time() < end:
 s.close()
 print("OK loop bounded")
 PY
+
+    loop_cid="$(docker compose -f "$COMPOSE_FILE" ps -q hub)"
+    if [[ -n "$loop_cid" ]] && command -v docker >/dev/null 2>&1; then
+        loop_stats="$(docker stats --no-stream --format '{{.CPUPerc}} {{.MemUsage}}' "$loop_cid" 2>/dev/null || true)"
+        if [[ -n "$loop_stats" ]]; then
+            python3 - "$loop_stats" <<'PY'
+import re, sys
+raw = sys.argv[1]
+cpu = raw.split()[0].rstrip("%")
+mem = raw.split()[1]
+value = float(re.sub(r"[^0-9.]", "", mem))
+if mem.endswith("GiB"):
+    value *= 1024
+elif mem.endswith("KiB"):
+    value /= 1024
+assert float(cpu) < 200.0, f"loop scenario CPU too high: {cpu}%"
+assert value < 64.0, f"loop scenario RSS too high: {value:.1f} MiB"
+print(f"OK loop resources bounded (cpu={cpu}% mem={value:.1f} MiB)")
+PY
+        fi
+    fi
 
     curl -sf -X DELETE "$HUB_API/api/v1/devices/loop-dmz" >/dev/null || true
     curl -sf -X DELETE "$DMZ_API/api/v1/devices/loop-hub" >/dev/null || true

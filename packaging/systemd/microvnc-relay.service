@@ -29,7 +29,8 @@ PrivateTmp=true
 
 # ProtectSystem=full mounts /etc read-only. The relay must write auth.json and
 # targets.yaml there, and its PID file under /run. RuntimeDirectory creates
-# /run/microvnc-relay owned by the service user.
+# /run/microvnc-relay. This unit runs as root; dropping to a dedicated uvnc
+# user is a Phase 4 packaging item.
 RuntimeDirectory=microvnc-relay
 RuntimeDirectoryMode=0750
 ReadWritePaths=/etc/microvnc-relay /run/microvnc-relay

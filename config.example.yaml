@@ -15,12 +15,12 @@ features:
   webui_enabled: true
 
   # Interactive visual network topology map (SVG/Canvas node graph)
-  # Set to false to use plain table view and save browser/client rendering
-  topology_map_enabled: true
+  # Reserved for Phase 3; the map is not implemented yet.
+  topology_map_enabled: false
 
   # In-browser noVNC HTML5 viewer and WebSocket-to-TCP bridge (/ws/vnc/*)
-  # Disable if you only use native desktop VNC clients to save WebSocket buffers
-  novnc_enabled: true
+  # Reserved for Phase 3; the bridge is not implemented yet.
+  novnc_enabled: false
 
   # Mode 1: Generic TCP port-forwarding (virtual_port -> host:port)
   # Works for any TCP: VNC 5900, RDP 3389, SSH 22, SMB 445/tcp, HTTP 80.

@@ -166,21 +166,12 @@ jobs:
       - name: Verify Docker Compose
         run: docker compose version
       - name: Run Gate 0 data-plane scenarios
+        env:
+          GATE0_WITH_LOOP: "1"
         run: bash scripts/gate0-compose.sh
 
-  arm64-race:
-    name: arm64 race (best effort)
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-      - name: Test linux/arm64 with race detector
-        run: |
-          docker run --rm --platform linux/arm64 \
-            -v "$PWD:/src" -w /src \
-            -e CGO_ENABLED=1 \
-            golang:1.26 go test -race ./...
+  # The arm64 -race job is intentionally not part of the required matrix:
+  # ThreadSanitizer under QEMU aborts with "unsupported VMA range", so a
+  # QEMU-based race job cannot produce trustworthy evidence. arm64 race
+  # coverage is tracked as a Gate 0 exit check on real arm64 hardware; the
+  # amd64 race job above remains the required in-CI race gate.

@@ -33,6 +33,15 @@ type wsClient struct {
 	createdAt time.Time
 }
 
+// wsFramePool recycles bounded inbound frame buffers. Telemetry clients send
+// almost nothing, so this keeps the 1 Hz steady state allocation-free.
+var wsFramePool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, maxWSFrameBytes)
+		return &buf
+	},
+}
+
 // WSStats is a point-in-time snapshot of the telemetry WebSocket hub.
 type WSStats struct {
 	Clients         int    `json:"clients"`
@@ -55,7 +64,8 @@ func (c *wsClient) writeFrame(opcode byte, payload []byte) error {
 		_ = c.conn.SetWriteDeadline(time.Time{})
 	}()
 
-	header := make([]byte, 0, 10)
+	var headerBuf [10]byte
+	header := headerBuf[:0]
 	header = append(header, 0x80|opcode)
 
 	length := len(payload)
@@ -66,9 +76,8 @@ func (c *wsClient) writeFrame(opcode byte, payload []byte) error {
 		header = append(header, 126, byte(length>>8), byte(length))
 	default:
 		header = append(header, 127)
-		var ext [8]byte
-		binary.BigEndian.PutUint64(ext[:], uint64(length))
-		header = append(header, ext[:]...)
+		binary.BigEndian.PutUint64(header[2:10], uint64(length))
+		header = header[:10]
 	}
 
 	if _, err := c.bufw.Write(header); err != nil {
@@ -90,7 +99,8 @@ func (c *wsClient) writeCloseFrame(code uint16, reason string) error {
 	if len(reason) > 123 {
 		reason = reason[:123]
 	}
-	payload := make([]byte, 2+len(reason))
+	var closeBuf [125]byte
+	payload := closeBuf[:2+len(reason)]
 	binary.BigEndian.PutUint16(payload[:2], code)
 	copy(payload[2:], reason)
 	return c.writeFrame(0x8, payload)
@@ -288,9 +298,11 @@ func (h *WSHub) readPump(c *wsClient) {
 			}
 		}
 
-		payload := make([]byte, length)
+		payloadBuf := wsFramePool.Get().(*[]byte)
+		payload := (*payloadBuf)[:int(length)]
 		if length > 0 {
 			if _, err := io.ReadFull(c.bufr, payload); err != nil {
+				wsFramePool.Put(payloadBuf)
 				return
 			}
 		}
@@ -303,6 +315,7 @@ func (h *WSHub) readPump(c *wsClient) {
 		switch opcode {
 		case 0x8: // close
 			_ = c.writeCloseFrame(1000, "")
+			wsFramePool.Put(payloadBuf)
 			return
 		case 0x9: // ping
 			_ = c.writePongFrame(payload)
@@ -311,6 +324,7 @@ func (h *WSHub) readPump(c *wsClient) {
 		default:
 			// Ignore unknown opcodes.
 		}
+		wsFramePool.Put(payloadBuf)
 	}
 }
 

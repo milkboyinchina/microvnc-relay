@@ -13,8 +13,8 @@
 - **Tier 1 (Primary Edge Target)**: Raspberry Pi 1 / Pi Zero (`armv6l` / `armhf`, `GOARM=6`), Raspberry Pi 2 (`armv7l`, `GOARM=7`), Orange Pi Zero LTS, 32-bit Armbian TV boxes.
 - **Tier 2 (Secondary Target)**: ARM64 (Raspberry Pi 3/4/5, Armbian Rockchip/Allwinner), x86-64 Linux, and Windows x64.
 - **RAM Constraint**: Strictly **< 256MB system limit** (Process RSS budget: **< 35MB at rated load** — ≤32 concurrent streams, ≤8 WebSocket clients — plus a documented kernel-memory envelope: `F_SETPIPE_SZ`-shrunk 16KB/pipe splice buffers + socket buffers; empirically measured at **~8.97 MB** across 10 concurrent streams on Raspberry Pi 2.
-  - **Gate 0 (Pi 2)**: 24h soak — 2,920 stages, max RSS **10,084 KB**, 0 heartbeat failures, no circuit breaker. Rated-load (32 streams × 64 KB) — max RSS **8,092 KB**, FDs 10, well under 35 MB. Systemd unit active: MemoryHigh=32M/MemoryMax=48M, but memory cgroup is **not mounted** on this Pi OS image (limits inert).
-  - **Gate 0 (Pi 1/Zero ARMv6)**: **deferred** — pending hardware provisioning. Cross-compile (`GOARM=6`) verified in CI; physical soak not yet run.)
+  - **Gate 0 (Pi 2) — code-complete, evidence not closed**: the committed 24h soak artifact reports 2,920 stages, max RSS **10,084 KB**, and no circuit breaker, but its producing runner is not yet reconciled with `scripts/soak.sh`. Rated-load (32 streams × 64 KB + 8 WebSocket clients) RSS and the systemd `MemoryHigh=32M`/`MemoryMax=48M` chain remain **unverified** — no supporting artifact exists, and the deployed unit used `GOMEMLIMIT=48MiB`/`MemoryMax=128M` with the memory cgroup unavailable.
+  - **Gate 0 (Pi 1/Zero ARMv6)**: **deferred** — pending hardware provisioning. Cross-compile (`GOARM=6`) verified in CI; physical soak not yet run.
 - **Storage Protection**: **Zero data caching**. MicroSD and eMMC flash writes are avoided; logs and telemetry remain in fixed-size RAM ring buffers unless explicitly enabled.
 
 ---
@@ -30,7 +30,7 @@ The project is organized into **4 incremental phases plus a Gate 0 hardening pas
 - **Goal**: Run reliably 24/7 as a standalone static binary / `systemd` service with zero memory leaks, zero flash wear, and full port-collision / brute-force safety.
 - **Phase 1 Checklist**:
   - [x] Core Go RFB proxy: Mode 1 generic TCP port forwarder & Mode 2 UltraVNC reverse ID matchmaker (`:5500` / `:5901`).
-  - [x] Stream forwarder using Linux kernel `splice(2)` zero-copy and pooled 32 KB `sync.Pool` buffers (`MeteredConn`) with optional token-bucket QoS rate limiting.
+  - [x] Stream forwarder using Linux kernel `splice(2)` zero-copy (`spliceMetered`, 16 KB chunks/pipes) with pooled 32 KB `sync.Pool` fallback buffers and optional token-bucket QoS rate limiting. `MeteredConn` remains a test/utility wrapper, not the production fast path.
   - [x] Mode 2 waiting server pool cap (`maxPendingServers = 64`) and non-blocking `MSG_PEEK` dead-socket pruning (`isSocketAlive`).
   - [x] Two-hop latency engine: Hop 1 `TCP_INFO` kernel RTT (`*_linux.go` / `*_other.go`) + Hop 2 bounded concurrent TCP SYN connect pinger (4-worker semaphore).
   - [x] Dual-file configuration (`config.yaml` for static daemon settings, `targets.yaml` for dynamic targets) with atomic writes and backward compatibility.
@@ -38,7 +38,7 @@ The project is organized into **4 incremental phases plus a Gate 0 hardening pas
   - [x] Static cross-service port collision validation (`web_bind`, `mode2` ports, duplicate `virtual_port`) + runtime OS `EADDRINUSE` tracking (`bind_errors`) across CLI, `systemd`, and WebUI.
   - [x] First-run WebUI admin credential setup (`auth.json` with `bcrypt`, **no default credentials**) and bounded in-memory brute-force rate limiter (`LoginRateLimiter`: 5 failures/5m ➔ 15m `HTTP 429` lockout; progressive-delay attempts are rejected immediately with `429` + `Retry-After` — no handler sleeps).
   - [x] Fixed-capacity circular ring buffers for event logs (500 lines) and 24h telemetry history (1,440 slots).
-  - [x] Embedded dark-mode WebUI dashboard (< 12 KB vanilla JS/CSS) with 1Hz WebSocket telemetry, device CRUD, and live toast notifications.
+  - [x] Embedded dark-mode WebUI dashboard (~47 KB raw / ~11 KB gzipped vanilla JS/CSS) with 1Hz WebSocket telemetry, device CRUD, and live toast notifications.
   - [x] Systemd unit (`GOMEMLIMIT=24MiB` + `MemoryHigh=32M`/`MemoryMax=48M` cgroup chain — see §3 & Gate 0) and multi-arch auto-detecting installer (`scripts/install-systemd.sh`).
   - [x] Empirical stress-test verification on physical Raspberry Pi 2 hardware (`cmd/stress-tester`).
 
@@ -73,19 +73,19 @@ The project is organized into **4 incremental phases plus a Gate 0 hardening pas
     - [x] Document the trade-off: token-bucket QoS pacing inherently forces the userspace copy/pacing path; it is the only remaining non-splice mode.
   - [x] **32-bit ARM Safety (`internal/`)**: typed `atomic.Uint64` counters (auto-aligned — misaligned `atomic.AddUint64` panics on `GOARCH=arm`); `GOARCH=arm` build + test in CI.
   - [x] **Probe Hygiene (`internal/telemetry/pinger.go`)**: `SO_LINGER 0` on probe sockets (TIME_WAIT accumulation); jittered per-host probe cadence (x11vnc/RealVNC rate-limit high-churn sources — the prober can get the relay banned).
-  - [x] **Installer Sysctls (`scripts/install-systemd.sh`)**: apply `net.ipv4.tcp_mtu_probing=1`; machine-id regeneration step for cloned SD images.
-  - [x] **CI Forward-Pull (was Phase 4)**: per-commit `GOARM=6`/`GOARM=7` cross-compile checks, `-race` on amd64/arm64, `govulncheck`, `goleak`, YAML/import parser fuzzing.
+  - [x] **Installer Sysctls (`scripts/install-systemd.sh`)**: apply `net.ipv4.tcp_mtu_probing=1`. Machine-id regeneration for cloned SD images lives in `scripts/prepare-cloned-image.sh`.
+  - [x] **CI Forward-Pull (was Phase 4)**: per-commit `GOARM=6`/`GOARM=7` cross-compile checks, `-race` on amd64, `govulncheck`, `goleak`, YAML/import parser fuzzing. arm64 race is deferred to real arm64 hardware (QEMU ThreadSanitizer aborts with an unsupported VMA range).
   - Physical ARMv6 soak: **deferred** — pending hardware (Pi 1/Zero not provisioned). Cross-compile verified.
-  - Smoke test: GOARM=6 binary ran on Pi 2 (ARMv7) without SIGILL; RSS 7,968 KB. Not a full soak.
+  - ARMv6 smoke test: GOARM=6 binary starts on Pi 2 (ARMv7) without SIGILL; RSS/stream measurements are retracted pending a reproducible transcript. Not a full soak.
   - [x] **Docker Daisy-Chain Test Harness (dev-only — audit)**: `docker compose` multi-hop topology (Hub ➔ Site DMZ ➔ Floor Pi relays + synthetic VNC targets) using **dev-tagged** builds (synthetic targets + fault injection exist only under `//go:build dev` — production images never ship them). Each container binds the real per-hop ports (`:5910`/`:8080`) in its own netns — port parity with the physical fleet. Data-plane scenarios shipped in Gate 0: direct, multi-hop `A ➔ B ➔ C`, `A ➔ B ➔ A` loops, abrupt disconnect, RST vs drop, and `tc netem` on the Site DMZ interface. Chain-control-plane scenarios (chain drift, duplicate `relay_id`, identity persistence across recreate, version skew/`api_version`, SSRF/inspect boundary) land with Phase 2a/b/c because those features do not exist yet. Container-to-container bridge traffic preserves real source IPs (published-port tests hit the Docker userland-proxy RST caveat). Runs on amd64 CI as an integration tier — **not** a resource-envelope test (physical ARMv6 soak remains mandatory). Production containerization (multi-arch release image, `uvnc:uvnc`, read-only rootfs, NetBird sidecar) stays in Phase 4.
 - **Gate 0 Exit Condition**: no unbounded control paths; reliable persistence & activation; tested failure recovery; the working tree committed & pushed so the spec, the published repo, and future audits agree.
 
 > **Hardware verification backlog (Gate 0, deferred)**:
 > - **Pi 1/Zero (ARMv6)** soak: deferred pending hardware provisioning. Cross-compile verified.
->   - **Smoke test (substitute)**: GOARM=6 binary ran on Pi 2 (ARMv7) without SIGILL — RSS 7,968 KB, 20 concurrent streams, no crash. Not a substitute for a 24h soak on 256 MB hardware; memory envelope on Pi 1/Zero remains unverified.
-> - **Systemd sandbox**: tested on Pi 2 (unit active, MemoryHigh=32M/MemoryMax=48M, but memory cgroup **not mounted** on this Pi OS image — limits inert; FDs 10, RSS 7,808 KB). Not tested on a non-Pi systemd host.
-> - **Rated-load RSS**: measured on Pi 2 — 32 streams × 64 KB, max RSS 8,092 KB, well under 35 MB. Not yet measured on Pi 1/Zero.
-> - **Memory cgroup**: not available on this Pi OS image; GOMEMLIMIT=24MiB and GOGC=50 remain the primary RSS controls.
+>   - **Smoke test (substitute)**: GOARM=6 binary starts on Pi 2 (ARMv7) without SIGILL. The earlier RSS/stream figures are retracted pending a reproducible transcript. Not a substitute for a 24h soak on 256 MB hardware; memory envelope on Pi 1/Zero remains unverified.
+> - **Systemd sandbox**: the committed unit uses `GOMEMLIMIT=24MiB` + `MemoryHigh=32M`/`MemoryMax=48M`, but this chain has **not been verified on a real host**. The only deployment evidence used `GOMEMLIMIT=48MiB`/`MemoryMax=128M`, and the memory cgroup was not mounted on that Pi OS image (limits inert). Treat the 32M/48M chain as unverified until `systemctl show`/cgroup output is attached.
+> - **Rated-load RSS**: **outstanding**. A 32-stream + 8-WebSocket-client measurement on HEAD is required before the <35MB rated-load claim can be used. No artifact currently supports the previously quoted 8,092 KB figure.
+> - **Memory cgroup**: not available on the deployed Pi OS image; `GOMEMLIMIT=24MiB` and `GOGC=50` remain the primary RSS controls.
 
 ---
 
@@ -325,8 +325,8 @@ To accommodate the most resource-constrained edge hardware (e.g. Raspberry Pi 1/
 features:
   webui_enabled: true              # Set false for Headless Pure Relay (~5-6MB RAM)
   chain_api_enabled: true           # Minimal chain-status/export listener; works when webui_enabled: false (Phase 2a)
-  topology_map_enabled: true       # Set false to disable Canvas/SVG map and use simple table
-  novnc_enabled: true              # Set false to disable WebSocket-to-TCP bridge
+  topology_map_enabled: false      # Reserved for Phase 3; no Canvas/SVG map yet
+  novnc_enabled: false             # Reserved for Phase 3; no /ws/vnc/* bridge yet
   mode1_enabled: true              # Mode 1 direct port mapping
   mode2_enabled: true              # Mode 2 reverse ID listener (ports 5500 & 5901)
   latency_probes_enabled: true     # Background TCP SYN polling
@@ -340,7 +340,7 @@ chain:                             # Phase 2a — chain API listener & trust mod
 
 ### Memory Footprint Profiles (Raspberry Pi 2 `armv7l`)
 
-> **Measurement honesty (audit)**: the **Full Stack** row is measured on physical Pi 2 (24h soak: max RSS 10,084 KB; rated-load 32 streams: max RSS 8,092 KB). The **Dashboard Only** row is an estimate pending re-measurement (its load range overlapping Full Stack was flagged as inconsistent). ARMv6 (Pi 1/Zero) measurements are **deferred** — pending hardware. The 35MB contract is defined at rated load with a documented kernel-memory envelope (§3), not as an idle-state claim.
+> **Measurement honesty (audit)**: the **Full Stack** row's 24h soak artifact reports max RSS 10,084 KB. The rated-load (32 streams + 8 WebSocket clients) figure is **outstanding** and the previously quoted 8,092 KB is retracted until a dated HEAD measurement exists. The **Dashboard Only** row is an estimate pending re-measurement (its load range overlapping Full Stack was flagged as inconsistent). ARMv6 (Pi 1/Zero) measurements are **deferred** — pending hardware. The 35MB contract is defined at rated load with a documented kernel-memory envelope (§3), not as an idle-state claim.
 
 | Operational Profile | Active Features | Idle RAM (RSS) | Active Load (2–10 Streams) | Use Case |
 |---|---|---|---|---|
@@ -388,9 +388,9 @@ To ensure the daemon runs 24/7 indefinitely without memory growth or SD card fai
 2. **Hop 2 (Relay ↔ Target VNC Server / Downstream Relay)**:
    - Periodic non-intrusive TCP connection handshake (SYN ➔ SYN/ACK) executed every 15–30s via a bounded 4-worker semaphore.
    - Differentiates the Phase 2a multi-state taxonomy (`ok`, `refused`, `timeout`, `host_unreachable`, `net_unreachable`, `dns_error`, `local_error`, `unsupported`, `unknown`); timeouts classify via `net.Error.Timeout()`, and chained targets are diagnosed via `chain/status` — never by probing the data-plane port.
-   - Non-root compatible; works safely inside rootless containers and unprivileged `systemd` services.
+   - The binary is non-root compatible and works inside rootless containers. The provided systemd unit currently runs as root; a dedicated service user is a Phase 4 packaging item.
 3. **Bandwidth Metering**:
-   - `MeteredConn` socket wrapper with atomic RX/TX byte counters pushed to WebUI every 1 second over WebSocket.
+   - The Linux fast path counts bytes from `splice(2)` return values (`spliceMetered`); the userspace fallback counts after pooled-buffer `Read`/`Write`. Counters are pushed to the WebUI every second over WebSocket. `MeteredConn` is a test/utility wrapper and is not used on the production fast path.
 
 ---
 

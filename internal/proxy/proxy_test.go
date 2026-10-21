@@ -528,25 +528,29 @@ func TestMode1AdmissionCapRejectsSecondSession(t *testing.T) {
 }
 
 func TestForwardStreamHalfCloseDrainsOppositeDirection(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	// Keep the test endpoints separate from the relay's sockets. ForwardStream
+	// closes its own client/target connections when it returns; if the test
+	// shared those exact sockets, the deferred close could discard unread bytes
+	// (the historical "client read pong: EOF" flake).
+	serverLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("listen: %v", err)
+		t.Fatalf("listen server: %v", err)
 	}
-	defer ln.Close()
+	defer serverLn.Close()
 
 	serverConnCh := make(chan net.Conn, 1)
 	go func() {
-		conn, err := ln.Accept()
+		conn, err := serverLn.Accept()
 		if err == nil {
 			serverConnCh <- conn
 		}
 	}()
 
-	clientConn, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+	relayTargetConn, err := net.DialTimeout("tcp", serverLn.Addr().String(), 2*time.Second)
 	if err != nil {
-		t.Fatalf("dial: %v", err)
+		t.Fatalf("dial server: %v", err)
 	}
-	defer clientConn.Close()
+	defer relayTargetConn.Close()
 
 	var serverConn net.Conn
 	select {
@@ -556,12 +560,40 @@ func TestForwardStreamHalfCloseDrainsOppositeDirection(t *testing.T) {
 	}
 	defer serverConn.Close()
 
+	clientLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen client: %v", err)
+	}
+	defer clientLn.Close()
+
+	relayClientCh := make(chan net.Conn, 1)
+	go func() {
+		conn, err := clientLn.Accept()
+		if err == nil {
+			relayClientCh <- conn
+		}
+	}()
+
+	clientConn, err := net.DialTimeout("tcp", clientLn.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial client: %v", err)
+	}
+	defer clientConn.Close()
+
+	var relayClientConn net.Conn
+	select {
+	case relayClientConn = <-relayClientCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out accepting relay-side client conn")
+	}
+	defer relayClientConn.Close()
+
 	limits := config.DefaultConfig().ConnectionLimits
 	limits.HalfCloseTimeoutSec = 2
 
 	forwardDone := make(chan struct{})
 	go func() {
-		ForwardStream(clientConn, serverConn, nil, limits, false)
+		ForwardStream(relayClientConn, relayTargetConn, nil, limits, false)
 		close(forwardDone)
 	}()
 

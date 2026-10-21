@@ -407,6 +407,9 @@ func runConcurrency(ctx context.Context, log *slog.Logger) error {
 	}
 	log.Info("concurrency done", "ok", st.streamsOK.Load(), "err", st.streamsErr.Load(),
 		"tx_bytes", st.bytesTx.Load(), "rx_bytes", st.bytesRx.Load())
+	// Machine-readable summary consumed by scripts/soak.sh.
+	fmt.Printf("RESULT ok=%d err=%d tx_bytes=%d rx_bytes=%d\n",
+		st.streamsOK.Load(), st.streamsErr.Load(), st.bytesTx.Load(), st.bytesRx.Load())
 	if st.streamsErr.Load() > 0 && eng != nil {
 		return fmt.Errorf("%d/%d streams failed: %v", st.streamsErr.Load(), *concurrency, st.samples)
 	}

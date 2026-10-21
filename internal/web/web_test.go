@@ -621,6 +621,123 @@ devices:
 	}
 }
 
+func TestDeviceActivationFailureRollsBack(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	configYAML := fmt.Sprintf(`
+server:
+  web_bind: "127.0.0.1:0"
+  vnc_bind: "127.0.0.1"
+features:
+  webui_enabled: true
+  mode1_enabled: true
+  mode2_enabled: false
+  latency_probes_enabled: false
+  bandwidth_metering_enabled: false
+security:
+  auth_enabled: false
+devices: []
+`)
+	if err := os.WriteFile(configPath, []byte(configYAML), 0640); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	// Occupy a port so the Mode 1 activation must fail after persistence.
+	blocker, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("occupy port: %v", err)
+	}
+	defer blocker.Close()
+	blockedPort := blocker.Addr().(*net.TCPAddr).Port
+
+	meter := proxy.NewTrafficMeter(false)
+	appLogger, err := logger.New(cfg.Logging, io.Discard)
+	if err != nil {
+		t.Fatalf("logger.New: %v", err)
+	}
+	pinger := telemetry.NewPinger(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+	mode1 := proxy.NewMode1Manager(cfg, meter, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := mode1.Start(); err != nil {
+		t.Fatalf("mode1.Start: %v", err)
+	}
+	defer mode1.Stop(context.Background())
+
+	server, err := NewServer(cfg, configPath, meter, pinger, appLogger, mode1.Reload, "test")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	if err := server.Start(); err != nil {
+		t.Fatalf("server.Start: %v", err)
+	}
+	defer server.Stop(context.Background())
+
+	addr := "http://" + server.Addr()
+	dev := config.DeviceConfig{ID: "blocked", Host: "127.0.0.1", Port: 5900, VirtualPort: blockedPort, Enabled: true}
+	body, _ := json.Marshal(dev)
+	resp, err := http.Post(addr+"/api/v1/devices", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST device: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 on activation failure, got %d", resp.StatusCode)
+	}
+	if devices := cfg.GetDevices(); len(devices) != 0 {
+		t.Fatalf("activation failure left device in memory: %+v", devices)
+	}
+	if _, ok := cfg.FindDevice("blocked"); ok {
+		t.Fatal("activation failure left the blocked device in config")
+	}
+
+	// PUT must be transactional too: a valid device updated onto an occupied
+	// port must remain at its previous virtual_port.
+	freeLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve free port: %v", err)
+	}
+	freePort := freeLn.Addr().(*net.TCPAddr).Port
+	_ = freeLn.Close()
+
+	stable := config.DeviceConfig{ID: "stable", Host: "127.0.0.1", Port: 5900, VirtualPort: freePort, Enabled: true}
+	stableBody, _ := json.Marshal(stable)
+	respCreate, err := http.Post(addr+"/api/v1/devices", "application/json", bytes.NewReader(stableBody))
+	if err != nil {
+		t.Fatalf("POST stable device: %v", err)
+	}
+	_ = respCreate.Body.Close()
+	if respCreate.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 creating stable device, got %d", respCreate.StatusCode)
+	}
+
+	updated := stable
+	updated.VirtualPort = blockedPort
+	updatedBody, _ := json.Marshal(updated)
+	req, err := http.NewRequest(http.MethodPut, addr+"/api/v1/devices/stable", bytes.NewReader(updatedBody))
+	if err != nil {
+		t.Fatalf("build PUT: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	respUpdate, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT device: %v", err)
+	}
+	_ = respUpdate.Body.Close()
+	if respUpdate.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 on update activation failure, got %d", respUpdate.StatusCode)
+	}
+	got, ok := cfg.FindDevice("stable")
+	if !ok {
+		t.Fatal("stable device disappeared after failed update")
+	}
+	if got.VirtualPort != freePort {
+		t.Fatalf("failed update changed virtual_port: got %d want %d", got.VirtualPort, freePort)
+	}
+}
+
 func TestCollectMetricsNilMeter(t *testing.T) {
 	cfg := config.DefaultConfig()
 	api := NewAPIHandler(cfg, "", nil, nil, nil, nil, nil, nil, "test")
@@ -634,5 +751,3 @@ func TestCollectMetricsNilMeter(t *testing.T) {
 		t.Fatalf("expected active_sessions_count to be 0, got %v", metrics["active_sessions_count"])
 	}
 }
-
-

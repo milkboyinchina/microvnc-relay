@@ -19,8 +19,11 @@ func TestLoadExampleConfig(t *testing.T) {
 	if !cfg.Features.WebUIEnabled {
 		t.Errorf("Expected WebUIEnabled to be true in config.example.yaml")
 	}
-	if !cfg.Features.TopologyMapEnabled {
-		t.Errorf("Expected TopologyMapEnabled to be true in config.example.yaml")
+	if cfg.Features.TopologyMapEnabled {
+		t.Errorf("Expected TopologyMapEnabled to default to false until Phase 3")
+	}
+	if cfg.Features.NoVNCEnabled {
+		t.Errorf("Expected NoVNCEnabled to default to false until Phase 3")
 	}
 	if len(cfg.Devices) != 3 {
 		t.Errorf("Expected 3 devices in config.example.yaml, got %d", len(cfg.Devices))

@@ -96,8 +96,7 @@ type Mode2Manager struct {
 	stopped   bool
 	admission *AdmissionController
 
-	reverseSem *Semaphore
-	viewerSem  *Semaphore
+	handshakeSem *Semaphore
 }
 
 // NewMode2Manager initializes a Mode 2 UltraVNC reverse ID matchmaker.
@@ -112,8 +111,7 @@ func NewMode2Manager(cfg *config.Config, meter *TrafficMeter, log *slog.Logger) 
 		pendingServers: make(map[int]*pendingServer),
 		pendingViewers: make(map[int]*pendingViewer),
 		stopCh:         make(chan struct{}),
-		reverseSem:     NewSemaphore(cfg.ConnectionLimits.MaxPendingHandshakes),
-		viewerSem:      NewSemaphore(cfg.ConnectionLimits.MaxPendingHandshakes),
+		handshakeSem:   NewSemaphore(cfg.ConnectionLimits.MaxPendingHandshakes),
 	}
 }
 
@@ -121,6 +119,15 @@ func NewMode2Manager(cfg *config.Config, meter *TrafficMeter, log *slog.Logger) 
 // It must be called before Start.
 func (m *Mode2Manager) SetAdmissionController(admission *AdmissionController) {
 	m.admission = admission
+}
+
+// SetHandshakeSemaphore attaches the process-wide pending-handshake gate shared
+// with Mode 1. Both the reverse-server and viewer accept paths draw from the
+// same capacity.
+func (m *Mode2Manager) SetHandshakeSemaphore(sem *Semaphore) {
+	if sem != nil {
+		m.handshakeSem = sem
+	}
 }
 
 // Start opens the Mode 2 reverse server listener and viewer listener if Mode2Enabled is true.
@@ -247,8 +254,8 @@ func (m *Mode2Manager) handleReverseServer(serverConn net.Conn, deadline time.Ti
 	}
 
 	handshakeHeld := false
-	if m.reverseSem != nil {
-		if !m.reverseSem.TryAcquire() {
+	if m.handshakeSem != nil {
+		if !m.handshakeSem.TryAcquire() {
 			if m.admission != nil {
 				m.admission.RecordHandshakeRejection()
 			}
@@ -262,7 +269,7 @@ func (m *Mode2Manager) handleReverseServer(serverConn net.Conn, deadline time.Ti
 	}
 	defer func() {
 		if handshakeHeld {
-			m.reverseSem.Release()
+			m.handshakeSem.Release()
 		}
 	}()
 
@@ -381,8 +388,8 @@ func (m *Mode2Manager) handleViewer(viewerConn net.Conn, deadline time.Time) {
 	}
 
 	handshakeHeld := false
-	if m.viewerSem != nil {
-		if !m.viewerSem.TryAcquire() {
+	if m.handshakeSem != nil {
+		if !m.handshakeSem.TryAcquire() {
 			if m.admission != nil {
 				m.admission.RecordHandshakeRejection()
 			}
@@ -396,7 +403,7 @@ func (m *Mode2Manager) handleViewer(viewerConn net.Conn, deadline time.Time) {
 	}
 	releaseHandshake := func() {
 		if handshakeHeld {
-			m.viewerSem.Release()
+			m.handshakeSem.Release()
 			handshakeHeld = false
 		}
 	}

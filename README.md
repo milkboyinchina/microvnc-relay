@@ -60,7 +60,7 @@ Raw VNC has great reliability, but historically suffered from three fatal flaws:
 - **Two-Hop Latency Engine**:
   - *Hop 1 (Client ↔ Relay)*: Microsecond RTT read directly from Linux kernel `TCP_INFO`.
   - *Hop 2 (Relay ↔ Target)*: Non-intrusive active TCP SYN handshake probes (~1.8ms).
-- **Embedded WebUI & noVNC**: Self-contained dark-mode management dashboard (< 12KB vanilla JS/CSS) with live 1Hz WebSocket telemetry and optional in-browser HTML5 remote control.
+- **Embedded WebUI**: Self-contained dark-mode management dashboard (~11 KB gzipped / ~47 KB raw vanilla JS/CSS) with live 1Hz WebSocket telemetry. The noVNC viewer and topology map are reserved for Phase 3; their flags default to `false` until implemented.
 
 ---
 
@@ -214,7 +214,7 @@ bash scripts/soak.sh \
   --ssh-host nb-api-apipi
 ```
 
-The script repeatedly drives 30s stream ramps, records RSS/cgroup memory/Slab/FD/heartbeat to CSV, and aborts on two missed heartbeats, RSS above 32MB, or available RAM below 400MB.
+The script repeatedly drives 30s stream ramps (1 MiB per stream at a 0.25 MB/s cap by default), records RSS/cgroup memory/Slab/FD/HTTP reachability/heartbeat latency/stage counters to CSV, and aborts on two consecutive failed HTTP checks, two heartbeats above 500ms, RSS above 32MB, or available RAM below 400MB. It also checks that end-of-run FDs return to baseline. Each run writes a matching `.log` containing the git commit, Go version, stress-binary SHA-256, exact command line, and per-stage output.
 
 On the relay host, `scripts/verify-pi2.sh` reports RSS, cgroup memory, kernel Slab, FDs, goroutines (dev build), disk writes, and API health.
 
